@@ -1,0 +1,10 @@
+{
+  "name": "idle-mod",
+  "version": "0.1.4",
+  "description": "Turns Claude Code's wait state into a live briefing on your own project: vulnerabilities, unpushed commits, stale branches, TODO/FIXME debt. Local only, zero tokens, and the fix is one button away.",
+  "author": {
+    "name": "Giuseppe De Martino"
+  },
+  "license": "MIT",
+  "keywords": ["mod", "statusline", "security", "dependencies", "wait-state", "productivity"]
+}

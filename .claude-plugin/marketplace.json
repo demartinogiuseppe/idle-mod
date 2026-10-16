@@ -1,0 +1,17 @@
+{
+  "name": "idle-mod",
+  "owner": {
+    "name": "Giuseppe De Martino"
+  },
+  "plugins": [
+    {
+      "name": "idle-mod",
+      "source": "./",
+      "description": "Turns Claude Code's wait state into a live briefing on your own project: vulnerabilities, unpushed commits, stale branches, TODO/FIXME debt. Local only, zero tokens, and the fix is one button away.",
+      "category": "productivity"
+    }
+  ],
+  "metadata": {
+    "description": "idle-mod: a live briefing on your own project while Claude Code works."
+  }
+}

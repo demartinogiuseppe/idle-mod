@@ -1,0 +1,8 @@
+*.zip
+.claude-plugin/types/
+node_modules/
+# make-demo.sh output, if it is ever run from inside this repo
+idle-intel-demo/
+idle-intel-demo-remote.git/
+# local cache of the older idle-intel status line
+.claude/

@@ -1,0 +1,97 @@
+# idle-mod
+
+**The wait state belongs to whoever is waiting.** This is idle-intel rebuilt as a Claude Code mod: while the agent thinks, a line above the prompt tells you something true about your own project, and the pane behind it hands each finding to Claude with one button.
+
+```
+✻ Incubating… (23s)
+◈ npm audit: 0 critical, 1 high severity          details
+```
+
+Click `details`, or run `/idle-mod`, and the pane opens. From the keyboard, `ctrl+x tab` moves focus to the band, then `i` opens it; while you are typing in the prompt, `i` is just a letter.
+
+```
+● npm audit: 0 critical, 1 high severity      [ preview ] [ fix with Claude ]
+● 2 unpushed commits on this branch           [ preview ] [ fix with Claude ]
+● 6 FIXME markers in tracked files            [ preview ] [ fix with Claude ]
+● 1 branch untouched 30+ days (e.g. old-login)
+rescan   scanned 4m ago
+```
+
+`preview` shows, under the line, the exact prompt that button would send; `fix with Claude` closes the pane and submits it for you. The prompts ask Claude to look and propose; none of them tells it to install or change anything before you say so.
+
+## What it detects
+
+| Collector | Findings |
+|---|---|
+| npm | known vulnerabilities (`npm audit`), major version jumps (`npm outdated`) |
+| git | unpushed commits, forgotten stashes, branches untouched 30+ days |
+| codebase | TODO / FIXME counts (lines holding the marker), via `git grep` over tracked files only |
+
+The npm checks run where the `package.json` is: in a monorepo, the package you started Claude in. The git checks run from the repository's top folder. A check that times out keeps its previous lines rather than dropping them, and none of them can throw: a broken check never breaks the interface. The branch you have checked out never counts as stale.
+
+## Why a mod and not a status line
+
+The original idle-intel was a bash script wired into `statusLine`. The mod version fixes what that could not:
+
+- **It knows when you're actually waiting.** `turn.start` and `turn.complete` are real events, so the briefing appears during the wait and leaves when work resumes — no 12-second guessing.
+- **It's installable.** `/plugin install`, nothing to edit in `settings.json`, no `.cmd` wrapper, no three copies of `bash.exe` fighting over one command on Windows.
+- **It can act.** A status line can only print. A mod can carry a button that submits a prompt.
+
+## Install
+
+```
+/plugin install idle-mod --marketplace demartinogiuseppe/idle-mod
+```
+
+In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `demartinogiuseppe/idle-mod`, then **Add plugin**.
+
+To try it before installing, clone this repo and run `claude --plugin-dir ./idle-mod` from your project.
+
+Built and tested on Claude Code v2.1.301 (run `claude --version` to check). The mod API is in early access and may change between releases, so an older or much newer version may not load it.
+
+## What it sends, and where it runs
+
+No telemetry, no server of ours, no account. The briefings never call the model, so they cost zero tokens; only pressing `fix with Claude` sends a prompt, the same as typing it yourself.
+
+What does leave your machine: in a project with a `package.json`, the mod runs `npm audit` and `npm outdated` when a session starts, and again when you start a turn or open the pane and the last scan is more than 30 minutes old. Like running those commands yourself, they send your dependency names and versions to the npm registry in your npm configuration. Everything else (git and the TODO/FIXME count) stays local.
+
+The last scan of each of your 20 most recent projects is saved on your machine, under Claude Code's configuration folder, so the next session can show it right away. It holds the project's path and the finding lines, nothing else.
+
+**Opening a repo you don't trust.**
+
+- A project's own `.npmrc` can send npm to any host and fill its values from your environment variables, so a cloned repo could have npm hand your tokens to that host. npm has no option to ignore that file, so the mod **skips the npm checks in any project that has its own `.npmrc`** and says so in the pane. Run `npm audit` yourself there if you trust the file.
+- A repo's `.git/config` can name programs for git to run. Every git command runs with `-c core.fsmonitor=false -c log.showSignature=false`, which keeps `git grep` and `git log` from starting one, and every npm command with `--git=git`.
+- Package names and versions are dropped unless they have npm's own format, and branch names are shown as plain ASCII, so text from the repo cannot carry control characters or sentences into the pane or a prompt. Counts can still be faked by a repo, so read a finding before you act on it.
+
+One thing to know before you install this or any other mod: **mods are not sandboxed.** Through Claude Code they can run programs and read files on your machine. Read the source before you trust it — it's one file, `hooks/register.js`, and you can list what it does without running it:
+
+```
+claude plugin validate ./idle-mod
+```
+
+The `hooks:` and `calls:` lines tell you every event it handles and everything it asks Claude Code to do.
+
+The band and the pane are drawn in the terminal and in the Desktop app's Code tab. Where nothing is drawn (`claude -p`, CI, an SDK script with no app attached) the mod runs no checks at all.
+
+## Test before you trust
+
+`test-kit/make-demo.sh` builds a disposable project containing **seven planted defects** — a real lodash CVE, a major version jump (chalk 4 → latest), two unpushed commits against a local fake remote, a stash, a branch backdated 45 days, and known TODO/FIXME counts — so you can check every collector against an answer written down in advance. The demo installs a package with a known vulnerability on purpose: keep it in its own folder, never run its code, and delete it when you're done.
+
+It needs bash, git, npm and Python 3. Run it from an empty folder outside this repo:
+
+```bash
+mkdir idle-mod-try && cd idle-mod-try
+bash /path/to/idle-mod/test-kit/make-demo.sh
+cd idle-intel-demo
+claude --plugin-dir /path/to/idle-mod
+```
+
+Then run `/idle-mod` and count. Expected: 7 of 7. Run it twice — once in the terminal, once in the Desktop app — because those are two separate installs of Claude Code, and a mod built against one can break on the other.
+
+That discipline comes from twenty years of food production auditing: you don't validate an inspection system by pointing it at something and hoping. You plant known defects and verify it finds exactly those.
+
+## License
+
+MIT. No server, no business model, free by construction.
+
+idle-mod is an independent project, not made, affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic, used here only to say what the mod works with.
