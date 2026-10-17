@@ -28,11 +28,22 @@ let previewed = null
 let problems = []
 // The project the findings belong to: `top` runs git, `npm` runs the npm checks.
 let where = { top: '', npm: '', git: false }
+// This session: when it started (unix seconds), the files Claude changed in
+// it, the npm lines already there at its first scan, and what its tools did
+// since the last scan. A line that is not this session's is the project's.
+let session = fresh()
+// Whether the pane shows the project's lines below this session's.
+let projectOpen = false
+
+function fresh() {
+  return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, dirty: { git: false, npm: false } }
+}
 
 // A cloned repo's .git/config names programs for git to run. These overrides
 // keep the checks from running one: core.fsmonitor (run by git grep) and
 // gpg.program (run by git log and friends when log.showSignature is on).
-const GIT = ['git', '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false']
+// submodule.recurse keeps git out of submodules the repo brings along.
+const GIT = ['git', '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-c', 'submodule.recurse=false']
 const NPM_SAFE = '--git=git'
 
 // Names and versions come from the project's own files and end up in a prompt
@@ -116,10 +127,13 @@ async function follow($) {
   insights = []
   problems = []
   collectedAt = 0
+  // Another project's npm lines say nothing about what this one had.
+  session.npmBefore = null
   try {
     const saved = await $.store.get(scanKey(w))
     if (saved && Array.isArray(saved.insights)) {
-      insights = saved.insights
+      // A saved session line belonged to the session that saved it.
+      insights = saved.insights.filter((item) => item.scope !== 'session')
       collectedAt = Number(saved.at) || 0
     }
   } catch {
@@ -196,8 +210,9 @@ async function npmInsights($, w) {
 async function gitInsights($, w) {
   if (!(await exists($, `${w.top}/.git`))) return []
 
-  const [ahead, stash, branches] = await Promise.all([
+  const [ahead, mine, stash, branches] = await Promise.all([
     run($, [...GIT, 'rev-list', '--count', '@{u}..HEAD'], w.top, 8000),
+    run($, [...GIT, 'rev-list', '--count', `--since=@${session.since}`, '@{u}..HEAD'], w.top, 8000),
     run($, [...GIT, 'stash', 'list'], w.top, 8000),
     run(
       $,
@@ -206,17 +221,27 @@ async function gitInsights($, w) {
       8000,
     ),
   ])
-  const broken = [ahead, stash, branches].find(failed)
+  const broken = [ahead, mine, stash, branches].find(failed)
   if (broken) return broken
 
   const out = []
   // No upstream, a detached HEAD or no commits yet: rev-list fails, no line.
-  const n = ahead.exitCode === 0 ? Number(ahead.stdout.trim()) || 0 : 0
+  const count = (r) => (r.exitCode === 0 ? Number(r.stdout.trim()) || 0 : 0)
+  const n = count(ahead)
   if (n > 0) {
     out.push({
       severity: 'warn',
       text: `${n} unpushed commit${n > 1 ? 's' : ''} on this branch`,
-      fix: 'Show me the unpushed commits on this branch and tell me whether they look ready to push.',
+      fix: "Show me the unpushed commits on this branch and tell me whether they look ready to push. Don't push anything until I say so.",
+    })
+  }
+  const m = count(mine)
+  if (m > 0) {
+    out.push({
+      scope: 'session',
+      severity: 'warn',
+      text: `${m} commit${m > 1 ? 's' : ''} made this session, not pushed yet`,
+      fix: "Show me the commits made in this session that are not pushed yet and tell me whether they look ready to push. Don't push anything until I say so.",
     })
   }
 
@@ -246,12 +271,21 @@ async function debtInsights($, w) {
   if (!(await exists($, `${w.top}/.git`))) return []
 
   // git grep stays inside tracked files, so node_modules and build output
-  // never enter the count. It counts lines that hold the marker.
-  const [fixme, todo] = await Promise.all([
+  // never enter the count. It counts lines that hold the marker. The files
+  // changed this session are counted again on their own, new ones included,
+  // their names taken literally rather than as patterns.
+  const files = touchedIn(w)
+  const inFiles = (word) =>
+    files.length
+      ? run($, [...GIT, '--literal-pathspecs', 'grep', '-cI', '--untracked', '-e', word, '--', ...files], w.top, 10000)
+      : { exitCode: 1, stdout: '' }
+  const [fixme, todo, myFixme, myTodo] = await Promise.all([
     run($, [...GIT, 'grep', '-cI', '-e', 'FIXME'], w.top, 10000),
     run($, [...GIT, 'grep', '-cI', '-e', 'TODO'], w.top, 10000),
+    inFiles('FIXME'),
+    inFiles('TODO'),
   ])
-  const broken = [fixme, todo].find(failed)
+  const broken = [fixme, todo, myFixme, myTodo].find(failed)
   if (broken) return broken
 
   const total = (res) =>
@@ -272,7 +306,33 @@ async function debtInsights($, w) {
     })
   }
   if (nTodo) out.push({ severity: 'info', text: `${nTodo} TODO marker${nTodo > 1 ? 's' : ''} across the project` })
+
+  const sFixme = total(myFixme)
+  const sTodo = total(myTodo)
+  if (sFixme) {
+    out.push({
+      scope: 'session',
+      severity: 'warn',
+      text: `${sFixme} FIXME marker${sFixme > 1 ? 's' : ''} in files changed this session`,
+      fix: 'Find the FIXME markers in the files you changed in this session and tell me which ones to fix now.',
+    })
+  }
+  if (sTodo) {
+    out.push({ scope: 'session', severity: 'info', text: `${sTodo} TODO marker${sTodo > 1 ? 's' : ''} in files changed this session` })
+  }
   return out
+}
+
+// The files changed this session inside this repo, relative to its top.
+function touchedIn(w) {
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '')
+  const top = norm(w.top) + '/'
+  const out = []
+  for (const path of session.touched) {
+    const f = norm(path)
+    if (f.toLowerCase().startsWith(top.toLowerCase()) && f.length > top.length) out.push(f.slice(top.length))
+  }
+  return out.slice(0, 200)
 }
 
 // Keep the last few projects only; the store is one file shared by all of them.
@@ -293,22 +353,39 @@ function redraw($) {
   }
 }
 
-// Never rejects, so callers may leave it unawaited.
-async function collect($) {
+// Never rejects, so callers may leave it unawaited. `npm: false` keeps the
+// npm lines as they are: a quick rescan after a turn, with no network.
+async function collect($, { npm = true } = {}) {
   if (collecting || !interactive) return
   collecting = true
+  session.dirty = { git: false, npm: npm ? false : session.dirty.npm }
   let w = null
   try {
     await follow($)
     w = where
     if (!w.top) return
     const sources = ['npm', 'git', 'debt']
-    const groups = await Promise.all([npmInsights($, w), gitInsights($, w), debtInsights($, w)])
+    const groups = await Promise.all([npm ? npmInsights($, w) : null, gitInsights($, w), debtInsights($, w)])
     if (w !== where) return
+    // The npm lines there at the session's first scan are the project's;
+    // one that shows up later (after an install, say) is the session's.
+    const npmLines = groups[0]
+    if (Array.isArray(npmLines)) {
+      if (!session.npmBefore) session.npmBefore = new Set(npmLines.map((item) => item.text))
+      for (const item of npmLines) if (!session.npmBefore.has(item.text)) item.scope = 'session'
+    }
+    const kept = (g) => g === null || failed(g)
     insights = groups
-      .flatMap((g, i) => (failed(g) ? insights.filter((item) => item.source === sources[i]) : g.map((item) => ({ ...item, source: sources[i] }))))
+      .flatMap((g, i) =>
+        kept(g)
+          ? insights.filter((item) => item.source === sources[i])
+          : g.map((item) => ({ scope: 'project', ...item, source: sources[i] })),
+      )
       .sort((a, b) => SEV[a.severity] - SEV[b.severity])
-    problems = groups.flatMap((g, i) => (failed(g) ? [{ text: `${CHECKS[sources[i]]} didn't run: ${g.failed}`, missing: g.missing }] : []))
+    problems = [
+      ...(npm ? [] : problems.filter((p) => p.source === 'npm')),
+      ...groups.flatMap((g, i) => (failed(g) ? [{ source: sources[i], text: `${CHECKS[sources[i]]} didn't run: ${g.failed}`, missing: g.missing }] : [])),
+    ]
     collectedAt = Date.now()
     await remember($, w)
   } catch {
@@ -329,9 +406,13 @@ function isStale() {
 
 const DOT = { high: 'red', warn: 'yellow', info: 'gray' }
 
+const mine = () => insights.filter((item) => item.scope === 'session')
+
+// The band rotates through this session's lines only.
 function current() {
-  if (!insights.length) return null
-  return insights[Math.floor(Date.now() / ROTATE_MS) % insights.length]
+  const lines = mine()
+  if (!lines.length) return null
+  return lines[Math.floor(Date.now() / ROTATE_MS) % lines.length]
 }
 
 // Whether anything draws this session. The desktop app hosts its Code tab as
@@ -343,6 +424,11 @@ async function drawn($) {
   } catch {
     return false
   }
+}
+
+// The .catch of the hooks that only watch tool calls: the call goes on as is.
+function passOn($, e, next) {
+  return next(e)
 }
 
 // The first time the session turns out to draw: show the saved scan, refresh.
@@ -357,6 +443,7 @@ export function register(on) {
   on('session.start', async ($, e, next) => {
     // Headless runs draw nothing, so they scan nothing.
     interactive = false
+    session = fresh()
 
     // Rotate the band while Claude is busy. Cheap: one redraw, no work.
     $.clock.every(ROTATE_MS, () => {
@@ -393,12 +480,49 @@ export function register(on) {
     return next(e)
   })
 
+  // After a turn that changed files, made commits or installed packages,
+  // rescan: git at once, npm only when the turn touched packages.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     busy = false
+    if (interactive && (session.dirty.git || session.dirty.npm)) collect($, { npm: session.dirty.npm })
     redraw($)
     return next(e)
   })
+
+  // The files Claude changes, in the main loop or a subagent, are this
+  // session's. A failed or refused edit changed nothing. These hooks only
+  // watch: the bookkeeping cannot throw, and if anything else does, the
+  // tool call goes on untouched.
+  for (const tool of ['Edit', 'Write', 'NotebookEdit']) {
+    on('tool.call', { tool }, async ($, e, next) => {
+      const result = await next(e)
+      try {
+        const path = e.file_path || e.notebook_path
+        if (typeof path === 'string' && path && !result.deny && !result.isError) {
+          session.touched.add(path)
+          session.dirty.git = true
+          if (/(^|[\\/])package(-lock)?\.json$/.test(path)) session.dirty.npm = true
+        }
+      } catch {
+        // bookkeeping only
+      }
+      return result
+    }).catch(passOn)
+  }
+
+  // Commands that change commits or installed packages call for a rescan.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const command = String(e.command || '')
+      if (/\bgit\s+(commit|merge|rebase|cherry-pick|revert|am|pull|reset|push)\b/.test(command)) session.dirty.git = true
+      if (/\b(npm|pnpm|yarn)\s+(i|install|add|ci|update|up|upgrade|remove|rm|uninstall)\b/.test(command)) session.dirty.npm = true
+    } catch {
+      // bookkeeping only
+    }
+    return result
+  }).catch(passOn)
 
   on('command.run', { command: 'idle-mod' }, async ($) => {
     // Someone ran the command, so something draws.
@@ -443,9 +567,9 @@ export function register(on) {
     const { Box, Text, Button, Link } = $.ui.resolve(e)
 
     // An empty pane keeps the rescan row below, so a scan can always be rerun.
-    const done = problems.length ? 'idle-mod: no findings from the checks that ran.' : 'idle-mod: nothing to report.'
+    const done = problems.length ? 'nothing new from the checks that ran.' : 'nothing new in this session.'
     const empty = Text({
-      children: [collecting ? 'idle-mod: scanning…' : collectedAt ? done : 'idle-mod: not scanned yet.'],
+      children: [collecting ? 'scanning…' : collectedAt ? done : 'not scanned yet.'],
       dimColor: true,
     })
 
@@ -472,7 +596,9 @@ export function register(on) {
 
     // Each row: the finding on the left, its buttons on the right edge, so the
     // buttons line up in one column. preview shows the exact prompt fix sends.
-    const rows = !insights.length ? [empty] : insights.map((item, i) => {
+    // A row's keys use its place in `insights`, unique across both sections.
+    const row = (item) => {
+      const i = insights.indexOf(item)
       const line = Box({
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -532,7 +658,27 @@ export function register(on) {
           }),
         ],
       })
-    })
+    }
+
+    // This session's lines first; the project's, there before the session
+    // started or outside what it changed, folded below until asked for.
+    const ours = mine()
+    const theirs = insights.filter((item) => item.scope !== 'session')
+    const heading = (text) => Text({ children: [text], bold: true })
+    const project = theirs.length
+      ? [
+          Text({ children: [' '] }),
+          Button({
+            key: 'project',
+            label: projectOpen ? 'hide the project lines' : `show the project lines (${theirs.length})`,
+            onPress: async () => {
+              projectOpen = !projectOpen
+              redraw($)
+            },
+          }),
+          ...(projectOpen ? [heading('In the project'), ...theirs.map(row)] : []),
+        ]
+      : []
 
     const age = Math.round((Date.now() - collectedAt) / 60000)
     const status = collecting ? 'scanning…' : collectedAt ? `scanned ${age}m ago` : ''
@@ -540,8 +686,10 @@ export function register(on) {
     return Box({
       flexDirection: 'column',
       children: [
-        ...rows,
+        heading('This session'),
+        ...(ours.length ? ours.map(row) : [empty]),
         ...notes,
+        ...project,
         Text({ children: [' '] }),
         Box({
           flexDirection: 'row',

@@ -1,23 +1,30 @@
 # idle-mod
 
-**The wait state belongs to whoever is waiting.** This is idle-intel rebuilt as a Claude Code mod: while the agent thinks, a line above the prompt tells you something true about your own project, and the pane behind it hands each finding to Claude with one button.
+**The wait state belongs to whoever is waiting.** This is idle-intel rebuilt as a Claude Code mod: while the agent thinks, a line above the prompt tells you something true about the work of this session, and the pane behind it hands each finding to Claude with one button.
 
 ```
 ✻ Incubating… (23s)
-◈ npm audit: 0 critical, 1 high severity          details
+◈ 1 FIXME marker in files changed this session          details
 ```
 
 Click `details`, or run `/idle-mod`, and the pane opens. From the keyboard, `ctrl+x tab` moves focus to the band, then `i` opens it; while you are typing in the prompt, `i` is just a letter.
 
 ```
-● npm audit: 0 critical, 1 high severity      [ preview ] [ fix with Claude ]
-● 2 unpushed commits on this branch           [ preview ] [ fix with Claude ]
-● 6 FIXME markers in tracked files            [ preview ] [ fix with Claude ]
-● 1 branch untouched 30+ days (e.g. old-login)
+This session
+● 1 commit made this session, not pushed yet       [ preview ] [ fix with Claude ]
+● 1 FIXME marker in files changed this session     [ preview ] [ fix with Claude ]
+● 2 TODO markers in files changed this session
+
+[ show the project lines (5) ]
+
 rescan   scanned 4m ago
 ```
 
-`preview` shows, under the line, the exact prompt that button would send; `fix with Claude` closes the pane and submits it for you. The prompts ask Claude to look and propose; none of them tells it to install or change anything before you say so.
+**This session** lists only what the session itself brought: markers in the files Claude edited or wrote here (new files included), commits made here and not pushed yet, and npm findings that were not there at the session's first scan (after an install, say). The band above the prompt rotates through these lines only. Everything that was already in the project, such as old stashes, stale branches, the project-wide TODO count or a vulnerability that predates the session, sits under **show the project lines**, folded until you open it. Two sessions on the same project each see their own work.
+
+After a turn that edited files or ran `git commit`, the session lines are rescanned right away (git only, no network); after `npm install` and the like, npm runs again too. Files changed by a shell command other than Claude's edit tools are not tracked.
+
+`preview` shows, under the line, the exact prompt that button would send; `fix with Claude` closes the pane and submits it for you. The prompts ask Claude to look and propose; none of them tells it to install, push or change anything before you say so.
 
 ## What it detects
 
@@ -72,7 +79,7 @@ The last scan of each of your 20 most recent projects is saved on your machine, 
 **Opening a repo you don't trust.**
 
 - A project's own `.npmrc` can send npm to any host and fill its values from your environment variables, so a cloned repo could have npm hand your tokens to that host. npm has no option to ignore that file, so the mod **skips the npm checks in any project that has its own `.npmrc`** and says so in the pane. That includes an `.npmrc` in any folder between the package and the repo's top, since npm 10 reads a workspace root's file too; one above the repo's top is yours and does not count. Run `npm audit` yourself there if you trust the file.
-- A repo's `.git/config` can name programs for git to run. Every git command runs with `-c core.fsmonitor=false -c log.showSignature=false`, which keeps `git grep` and `git log` from starting one, and every npm command with `--git=git`.
+- A repo's `.git/config` can name programs for git to run. Every git command runs with `-c core.fsmonitor=false -c log.showSignature=false -c submodule.recurse=false`, which keeps `git grep` and `git log` from starting one and git out of submodules the repo brings along, and every npm command with `--git=git`. The names of the files changed this session reach `git grep` after `--` with `--literal-pathspecs`, so a file name is never read as a pattern or an option.
 - Package names and versions are dropped unless they have npm's own format, and branch names are shown as plain ASCII, so text from the repo cannot carry control characters or sentences into the pane or a prompt. Counts can still be faked by a repo, so read a finding before you act on it.
 
 One thing to know before you install this or any other mod: **mods are not sandboxed.** Through Claude Code they can run programs and read files on your machine. Read the source before you trust it — it's one file, `hooks/register.js`, and you can list what it does without running it:
@@ -98,7 +105,7 @@ cd idle-intel-demo
 claude --plugin-dir /path/to/idle-mod
 ```
 
-Then run `/idle-mod` and count. Expected: 7 of 7. Run it twice — once in the terminal, once in the Desktop app — because those are two separate installs of Claude Code, and a mod built against one can break on the other.
+Then run `/idle-mod`, open **show the project lines** and count: the seven defects were there before the session started, so they are the project's. Expected: 7 of 7. To see a session line, ask Claude to add a `// FIXME` to `src/app.js`: after that turn it shows under **This session** and in the band. Run it twice — once in the terminal, once in the Desktop app — because those are two separate installs of Claude Code, and a mod built against one can break on the other.
 
 That discipline comes from twenty years of food production auditing: you don't validate an inspection system by pointing it at something and hoping. You plant known defects and verify it finds exactly those.
 

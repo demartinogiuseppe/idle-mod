@@ -19,11 +19,15 @@ type World = {
 const posix = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 // The command as a person would type it, without the mod's safety overrides.
-const SAFE_GIT = ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false']
+const SAFE_GIT = ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-c', 'submodule.recurse=false']
+// The session's start time is spelled `--since=@T`, so a test can name it.
 const plain = (argv: readonly string[]) => {
   const a = [...argv]
   if (a[0] === 'git' && SAFE_GIT.every((x, i) => a[i + 1] === x)) a.splice(1, SAFE_GIT.length)
-  return a.filter((x) => x !== '--git=git').join(' ')
+  return a
+    .filter((x) => x !== '--git=git')
+    .map((x) => (/^--since=@\d+$/.test(x) ? '--since=@T' : x))
+    .join(' ')
 }
 
 // A fake machine beneath the mod: the test answers every engine call it makes.
@@ -44,6 +48,7 @@ function world(on: On, w: World) {
   on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('tool.call', () => ({ result: {}, text: '' }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return Text({ children: ['engine'] })
@@ -99,10 +104,18 @@ const mountBand = ($: any, isWorking: boolean) =>
 
 const texts = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
 
+// Run one scan to the end and unfold the project's lines, so every line
+// the scan found is drawn.
+async function rescan(ui: any) {
+  await ui.press({ key: 'rescan' })
+  const fold = await ui.find({ key: 'project' })
+  if (fold && JSON.stringify(fold).includes('show the project lines')) await ui.press({ key: 'project' })
+}
+
 // Mount the pane and run one scan to the end.
 async function scanned($: any) {
   const ui = await mountPane($)
-  await ui.press({ key: 'rescan' })
+  await rescan(ui)
   return ui
 }
 
@@ -114,7 +127,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({
       plugin: PLUGIN, surface, component: 'Pane', props: paneProps, requestId: 'idle-mod',
     })
-    await ui.press({ key: 'rescan' })
+    await rescan(ui)
 
     const shown = (await texts(ui)).filter((t) => SEVEN.includes(t))
     expect(shown).toEqual(SEVEN)
@@ -182,9 +195,9 @@ test('after /cd the pane shows the new project, not the old one', async ($, on) 
   expect(await texts(ui)).toContain('1 stash sitting around')
 
   w.root = '/b'
-  await ui.press({ key: 'rescan' })
+  await rescan(ui)
   expect(await texts(ui)).not.toContain('1 stash sitting around')
-  expect(await texts(ui)).toContain('idle-mod: nothing to report.')
+  expect(await texts(ui)).toContain('nothing new in this session.')
 })
 
 test('a check that times out keeps its previous lines instead of dropping them', async ($, on) => {
@@ -197,7 +210,7 @@ test('a check that times out keeps its previous lines instead of dropping them',
 
   w.fail!.add('git stash list')
   w.runs['git grep -cI -e TODO'] = { exitCode: 0, stdout: 'src/app.js:5\n' }
-  await ui.press({ key: 'rescan' })
+  await rescan(ui)
 
   const shown = await texts(ui)
   expect(shown).toContain('1 stash sitting around')
@@ -338,7 +351,7 @@ test('the desktop app scans once its surface attaches', async ($, on) => {
   w.surfaces = ['desktop']
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
   const ui = await mountPane($)
-  await ui.press({ key: 'rescan' })
+  await rescan(ui)
 
   expect((await texts(ui)).filter((t) => SEVEN.includes(t))).toEqual(SEVEN)
 })
@@ -360,7 +373,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({
       plugin: PLUGIN, surface, component: 'Pane', props: paneProps, requestId: 'idle-mod',
     })
-    await ui.press({ key: 'rescan' })
+    await rescan(ui)
     const prompt = (t: string[]) => t.find((x) => x.startsWith('Run npm audit'))
 
     expect(prompt(await texts(ui))).toBeUndefined()
@@ -411,17 +424,120 @@ test('opening the pane wakes a session that looked headless at start', async ($,
   await $.session.start({ cwd: '/demo', surface: null, isInteractive: false })
 
   const ui = await mountPane($)
-  await ui.press({ key: 'rescan' })
-  await ui.press({ key: 'rescan' })
+  await rescan(ui)
+  await rescan(ui)
 
   expect((await texts(ui)).filter((t) => SEVEN.includes(t))).toEqual(SEVEN)
 })
 
-test('the band shows only while Claude is working', async ($, on) => {
+// What the session-only greps print once Claude has edited src/app.js.
+const sessionGrep = (word: string) => `git --literal-pathspecs grep -cI --untracked -e ${word} -- src/app.js`
+const editApp = ($: any) =>
+  $.tool.call({ tool: 'Edit', file_path: '/demo/src/app.js', old_string: 'a', new_string: 'b' })
+
+test('a fresh session shows nothing of its own, and folds the project lines', async ($, on) => {
   mock.store(on)
   world(on, { root: '/demo', files: demoFiles('/demo'), runs: demoRuns('/demo') })
-  await scanned($)
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
 
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  const shown = await texts(ui)
+
+  expect(shown).toContain('nothing new in this session.')
+  expect(shown.filter((t) => SEVEN.includes(t))).toEqual([])
+  expect(JSON.stringify(await ui.find({ key: 'project' }))).toContain('show the project lines (7)')
+
+  await ui.press({ key: 'project' })
+  expect((await texts(ui)).filter((t) => SEVEN.includes(t))).toEqual(SEVEN)
+})
+
+test('markers in a file Claude edited this session are the session\'s', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  runs[sessionGrep('FIXME')] = { exitCode: 0, stdout: 'src/app.js:1\n' }
+  runs[sessionGrep('TODO')] = { exitCode: 0, stdout: 'src/app.js:2\n' }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  await editApp($)
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  const shown = await texts(ui)
+
+  expect(shown).toContain('1 FIXME marker in files changed this session')
+  expect(shown).toContain('2 TODO markers in files changed this session')
+  // The project totals stay folded.
+  expect(shown).not.toContain('2 FIXME markers in tracked files')
+})
+
+test('commits made this session and not pushed are the session\'s', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  runs['git rev-list --count --since=@T @{u}..HEAD'] = { exitCode: 0, stdout: '1\n' }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+
+  expect(await texts(ui)).toContain('1 commit made this session, not pushed yet')
+})
+
+test('an npm problem that shows up after the first scan is the session\'s', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  expect(await texts(ui)).not.toContain('npm audit: 0 critical, 2 high severity')
+
+  // Something in the session installed a second vulnerable package.
+  runs['npm audit --json'] = {
+    exitCode: 1,
+    stdout: JSON.stringify({ metadata: { vulnerabilities: { critical: 0, high: 2, moderate: 0 } } }),
+  }
+  await ui.press({ key: 'rescan' })
+
+  expect(await texts(ui)).toContain('npm audit: 0 critical, 2 high severity')
+})
+
+test('after a turn that edited files, git is rescanned and npm is not', async ($, on) => {
+  mock.store(on)
+  const calls: { argv: string[]; cwd?: string }[] = []
+  const runs = demoRuns('/demo')
+  runs[sessionGrep('FIXME')] = { exitCode: 0, stdout: 'src/app.js:1\n' }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs, calls })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  const npmBefore = calls.filter((c) => c.argv[0] === 'npm').length
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await editApp($)
+  await $.turn.complete({ turnId: 't1' })
+  await ui.press({ key: 'project' })
+  await ui.press({ key: 'project' })
+
+  expect(await texts(ui)).toContain('1 FIXME marker in files changed this session')
+  expect(calls.filter((c) => c.argv[0] === 'npm').length).toBe(npmBefore)
+})
+
+test('the band shows only this session\'s lines, only while Claude is working', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  runs[sessionGrep('FIXME')] = { exitCode: 0, stdout: 'src/app.js:1\n' }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+
+  // Only project lines so far: nothing for the band.
+  expect(await (await mountBand($, true)).find({ key: 'open-pane' })).toBeUndefined()
+
+  await editApp($)
+  await ui.press({ key: 'rescan' })
   expect(await (await mountBand($, true)).find({ key: 'open-pane' })).toBeDefined()
   expect(await (await mountBand($, false)).find({ key: 'open-pane' })).toBeUndefined()
 })
