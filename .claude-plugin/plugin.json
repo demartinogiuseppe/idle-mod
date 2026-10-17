@@ -1,6 +1,6 @@
 {
   "name": "idle-mod",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Turns Claude Code's wait state into a live briefing on your own project: vulnerabilities, unpushed commits, stale branches, TODO/FIXME debt. Local only, zero tokens, and the fix is one button away.",
   "author": {
     "name": "Giuseppe De Martino"

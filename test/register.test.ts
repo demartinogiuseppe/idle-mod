@@ -355,10 +355,20 @@ test('a check whose command cannot start says so in the pane', async ($, on) => 
   const ui = await scanned($)
   const shown = await texts(ui)
 
-  expect(shown).toContain('▲ git checks didn\'t run: git could not start (installed and on PATH?)')
-  expect(shown).toContain('▲ TODO/FIXME count didn\'t run: git could not start (installed and on PATH?)')
+  expect(shown).toContain('▲ git checks didn\'t run: git could not start')
+  expect(shown).toContain('▲ TODO/FIXME count didn\'t run: git could not start')
   // npm still ran
   expect(shown).toContain('npm audit: 0 critical, 1 high severity')
+
+  // Where to get git, once, though two checks need it.
+  expect(shown).toContain('Install Git, then restart Claude Code.')
+  const links = await ui.findAll({ type: 'Link' })
+  expect(links).toHaveLength(1)
+  expect(JSON.stringify(links[0])).toContain('https://git-scm.com/downloads')
+
+  // The desktop app draws the same help.
+  const desk = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', props: paneProps, requestId: 'idle-mod' })
+  expect(await desk.findAll({ type: 'Link' })).toHaveLength(1)
 })
 
 test('npm audit without a lockfile says it needs one', async ($, on) => {

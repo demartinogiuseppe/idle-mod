@@ -45,9 +45,21 @@ The original idle-intel was a bash script wired into `statusLine`. The mod versi
 
 In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `demartinogiuseppe/idle-mod`, then **Add plugin**.
 
+Or in two steps: `/plugin marketplace add demartinogiuseppe/idle-mod`, then `/plugin install idle-mod@idle-mod`.
+
 To try it before installing, clone this repo and run `claude --plugin-dir ./idle-mod` from your project.
 
-Built and tested on Claude Code v2.1.301 (run `claude --version` to check). The mod API is in early access and may change between releases, so an older or much newer version may not load it.
+## Requirements
+
+| Needs | For | Get it |
+|---|---|---|
+| Claude Code with mod support | the mod itself | built and tested on v2.1.301; `claude --version` to check, `claude update` to update |
+| Git | git checks, TODO/FIXME count | [git-scm.com/downloads](https://git-scm.com/downloads) |
+| Node.js with npm | npm checks, only in projects with a `package.json` | [nodejs.org/en/download](https://nodejs.org/en/download) |
+
+The mod API is in early access and may change between releases, so an older or much newer Claude Code may not load it. If `/idle-mod` is not a valid command after a restart, the mod did not load, and it cannot tell you why from inside: check the version first.
+
+When Git or npm is missing, the pane says which check did not run and links to where to get it. If it is installed but the pane still says it could not start, the app does not see it on its PATH: check that `git --version` (or `npm --version`) works in a new terminal, then restart the app.
 
 ## What it sends, and where it runs
 

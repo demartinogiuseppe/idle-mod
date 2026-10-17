@@ -10,6 +10,11 @@ const KEEP_PROJECTS = 20
 // Severity sets the order in the pane; the band rotates through every line.
 const SEV = { high: 0, warn: 1, info: 2 }
 const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count' }
+// What to do when a command the checks need cannot start.
+const HELP = {
+  git: { install: 'Install Git, then restart Claude Code.', href: 'https://git-scm.com/downloads', label: 'git-scm.com/downloads' },
+  npm: { install: 'Install Node.js, which includes npm, then restart Claude Code.', href: 'https://nodejs.org/en/download', label: 'nodejs.org/en/download' },
+}
 
 // Module state. Lost on reload, rebuilt by the next session.start.
 let insights = []
@@ -51,7 +56,8 @@ async function run($, argv, cwd, timeoutMs) {
     return await $.process.run(argv, { cwd, timeoutMs })
   } catch {
     const late = Date.now() - started >= timeoutMs - 1000
-    return { failed: late ? `${argv[0]} timed out` : `${argv[0]} could not start (installed and on PATH?)` }
+    if (late) return { failed: `${argv[0]} timed out` }
+    return { failed: `${argv[0]} could not start`, missing: argv[0] }
   }
 }
 
@@ -285,7 +291,7 @@ async function collect($) {
     insights = groups
       .flatMap((g, i) => (failed(g) ? insights.filter((item) => item.source === sources[i]) : g.map((item) => ({ ...item, source: sources[i] }))))
       .sort((a, b) => SEV[a.severity] - SEV[b.severity])
-    problems = groups.flatMap((g, i) => (failed(g) ? [`${CHECKS[sources[i]]} didn't run: ${g.failed}`] : []))
+    problems = groups.flatMap((g, i) => (failed(g) ? [{ text: `${CHECKS[sources[i]]} didn't run: ${g.failed}`, missing: g.missing }] : []))
     collectedAt = Date.now()
     await remember($, w)
   } catch {
@@ -417,7 +423,7 @@ export function register(on) {
     if (e.requestId !== PANE) return next(e)
     // The pane is being drawn, so something draws, whatever session.start said.
     if (!interactive) wake($)
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
 
     // An empty pane keeps the rescan row below, so a scan can always be rerun.
     const done = problems.length ? 'idle-mod: no findings from the checks that ran.' : 'idle-mod: nothing to report.'
@@ -426,8 +432,26 @@ export function register(on) {
       dimColor: true,
     })
 
-    // Checks that could not run say so, instead of leaving the pane silent.
-    const notes = problems.map((p) => Text({ children: ['▲ ' + p], color: 'yellow' }))
+    // Checks that could not run say so, instead of leaving the pane silent,
+    // and a missing command comes with where to get it, once per command.
+    const missing = [...new Set(problems.map((p) => p.missing).filter((m) => HELP[m]))]
+    const notes = [
+      ...problems.map((p) => Text({ children: ['▲ ' + p.text], color: 'yellow' })),
+      ...missing.map((m) =>
+        Box({
+          flexDirection: 'column',
+          paddingLeft: 2,
+          children: [
+            Box({
+              flexDirection: 'row',
+              columnGap: 1,
+              children: [Text({ children: [HELP[m].install] }), Link({ href: HELP[m].href, label: HELP[m].label })],
+            }),
+            Text({ children: [`Already installed? If \`${m} --version\` works in a new terminal, restart the app so it sees the same PATH.`], dimColor: true }),
+          ],
+        }),
+      ),
+    ]
 
     // Each row: the finding on the left, its buttons on the right edge, so the
     // buttons line up in one column. preview shows the exact prompt fix sends.
