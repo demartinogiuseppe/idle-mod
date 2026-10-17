@@ -347,6 +347,42 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+test('a check whose command cannot start says so in the pane', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  const fail = new Set(Object.keys(runs).filter((k) => k.startsWith('git ')))
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs, fail })
+  const ui = await scanned($)
+  const shown = await texts(ui)
+
+  expect(shown).toContain('▲ git checks didn\'t run: git could not start (installed and on PATH?)')
+  expect(shown).toContain('▲ TODO/FIXME count didn\'t run: git could not start (installed and on PATH?)')
+  // npm still ran
+  expect(shown).toContain('npm audit: 0 critical, 1 high severity')
+})
+
+test('npm audit without a lockfile says it needs one', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  runs['npm audit --json'] = { exitCode: 1, stdout: JSON.stringify({ error: { code: 'ENOLOCK' } }) }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  const ui = await scanned($)
+
+  expect(await texts(ui)).toContain('▲ npm checks didn\'t run: npm audit needs a package-lock.json')
+})
+
+test('opening the pane wakes a session that looked headless at start', async ($, on) => {
+  mock.store(on)
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs: demoRuns('/demo') })
+  await $.session.start({ cwd: '/demo', surface: null, isInteractive: false })
+
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  await ui.press({ key: 'rescan' })
+
+  expect((await texts(ui)).filter((t) => SEVEN.includes(t))).toEqual(SEVEN)
+})
+
 test('the band shows only while Claude is working', async ($, on) => {
   mock.store(on)
   world(on, { root: '/demo', files: demoFiles('/demo'), runs: demoRuns('/demo') })

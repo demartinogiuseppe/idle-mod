@@ -9,6 +9,7 @@ const KEEP_PROJECTS = 20
 
 // Severity sets the order in the pane; the band rotates through every line.
 const SEV = { high: 0, warn: 1, info: 2 }
+const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count' }
 
 // Module state. Lost on reload, rebuilt by the next session.start.
 let insights = []
@@ -18,6 +19,8 @@ let busy = false
 let interactive = true
 // The finding whose prompt the pane shows in full, by its text; null for none.
 let previewed = null
+// Why checks of the last scan could not run, one line each, for the pane.
+let problems = []
 // The project the findings belong to: `top` runs git, `npm` runs the npm checks.
 let where = { top: '', npm: '' }
 
@@ -36,17 +39,23 @@ const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.]{1,20})?(\+[0-9A-Za-z.]{1,20})?$/
 const safe = (s) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, 40)
 
 // --------------------------------------------------------------- collectors
-// Each collector returns a list of { severity, text, fix }, or null when a
-// check could not run (a timeout, unreadable output): the previous lines of
-// that collector then stay. None of them throws.
+// Each collector returns a list of { severity, text, fix }, or { failed } with
+// the reason when a check could not run: the previous lines of that collector
+// then stay, and the pane says why. None of them throws.
 
+// $.process.run rejects both when a command cannot start and when it runs out
+// of time; how long it took tells the two apart.
 async function run($, argv, cwd, timeoutMs) {
+  const started = Date.now()
   try {
     return await $.process.run(argv, { cwd, timeoutMs })
   } catch {
-    return null
+    const late = Date.now() - started >= timeoutMs - 1000
+    return { failed: late ? `${argv[0]} timed out` : `${argv[0]} could not start (installed and on PATH?)` }
   }
 }
+
+const failed = (r) => Boolean(r && r.failed)
 
 async function exists($, path) {
   try {
@@ -82,6 +91,7 @@ async function follow($) {
   if (!w || (w.top === where.top && w.npm === where.npm)) return
   where = w
   insights = []
+  problems = []
   collectedAt = 0
   try {
     const saved = await $.store.get(scanKey(w))
@@ -108,11 +118,14 @@ async function npmInsights($, w) {
     run($, ['npm', 'audit', '--json', NPM_SAFE], w.npm, 30000),
     run($, ['npm', 'outdated', '--json', NPM_SAFE], w.npm, 60000),
   ])
-  if (!audit || !outdated) return null
+  if (failed(audit)) return audit
+  if (failed(outdated)) return outdated
 
   const out = []
   try {
-    const vulns = JSON.parse(audit.stdout).metadata.vulnerabilities
+    const report = JSON.parse(audit.stdout)
+    if (report.error && report.error.code === 'ENOLOCK') return { failed: 'npm audit needs a package-lock.json' }
+    const vulns = report.metadata.vulnerabilities
     const critical = Number(vulns.critical) || 0
     const high = Number(vulns.high) || 0
     const moderate = Number(vulns.moderate) || 0
@@ -126,7 +139,7 @@ async function npmInsights($, w) {
       out.push({ severity: 'info', text: `npm audit: ${moderate} moderate, nothing critical` })
     }
   } catch {
-    return null
+    return { failed: 'npm audit gave no report' }
   }
 
   if (outdated.stdout.trim()) {
@@ -151,7 +164,7 @@ async function npmInsights($, w) {
         })
       }
     } catch {
-      return null
+      return { failed: 'npm outdated gave no report' }
     }
   }
   return out
@@ -170,7 +183,8 @@ async function gitInsights($, w) {
       8000,
     ),
   ])
-  if (!ahead || !stash || !branches) return null
+  const broken = [ahead, stash, branches].find(failed)
+  if (broken) return broken
 
   const out = []
   // No upstream, a detached HEAD or no commits yet: rev-list fails, no line.
@@ -214,7 +228,8 @@ async function debtInsights($, w) {
     run($, [...GIT, 'grep', '-cI', '-e', 'FIXME'], w.top, 10000),
     run($, [...GIT, 'grep', '-cI', '-e', 'TODO'], w.top, 10000),
   ])
-  if (!fixme || !todo) return null
+  const broken = [fixme, todo].find(failed)
+  if (broken) return broken
 
   const total = (res) =>
     res.stdout
@@ -268,8 +283,9 @@ async function collect($) {
     const groups = await Promise.all([npmInsights($, w), gitInsights($, w), debtInsights($, w)])
     if (w !== where) return
     insights = groups
-      .flatMap((g, i) => (g ? g.map((item) => ({ ...item, source: sources[i] })) : insights.filter((item) => item.source === sources[i])))
+      .flatMap((g, i) => (failed(g) ? insights.filter((item) => item.source === sources[i]) : g.map((item) => ({ ...item, source: sources[i] }))))
       .sort((a, b) => SEV[a.severity] - SEV[b.severity])
+    problems = groups.flatMap((g, i) => (failed(g) ? [`${CHECKS[sources[i]]} didn't run: ${g.failed}`] : []))
     collectedAt = Date.now()
     await remember($, w)
   } catch {
@@ -399,13 +415,19 @@ export function register(on) {
   // The pane: everything at once, each fixable line with its own button.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
+    // The pane is being drawn, so something draws, whatever session.start said.
+    if (!interactive) wake($)
     const { Box, Text, Button } = $.ui.resolve(e)
 
     // An empty pane keeps the rescan row below, so a scan can always be rerun.
+    const done = problems.length ? 'idle-mod: no findings from the checks that ran.' : 'idle-mod: nothing to report.'
     const empty = Text({
-      children: [collecting ? 'idle-mod: scanning…' : collectedAt ? 'idle-mod: nothing to report.' : 'idle-mod: not scanned yet.'],
+      children: [collecting ? 'idle-mod: scanning…' : collectedAt ? done : 'idle-mod: not scanned yet.'],
       dimColor: true,
     })
+
+    // Checks that could not run say so, instead of leaving the pane silent.
+    const notes = problems.map((p) => Text({ children: ['▲ ' + p], color: 'yellow' }))
 
     // Each row: the finding on the left, its buttons on the right edge, so the
     // buttons line up in one column. preview shows the exact prompt fix sends.
@@ -478,6 +500,7 @@ export function register(on) {
       flexDirection: 'column',
       children: [
         ...rows,
+        ...notes,
         Text({ children: [' '] }),
         Box({
           flexDirection: 'row',
