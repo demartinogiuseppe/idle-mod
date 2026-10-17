@@ -27,7 +27,7 @@ rescan   scanned 4m ago
 | git | unpushed commits, forgotten stashes, branches untouched 30+ days |
 | codebase | TODO / FIXME counts (lines holding the marker), via `git grep` over tracked files only |
 
-The npm checks run where the `package.json` is: in a monorepo, the package you started Claude in. The git checks run from the repository's top folder. A check that times out keeps its previous lines rather than dropping them, and none of them can throw: a broken check never breaks the interface. The branch you have checked out never counts as stale.
+The npm checks run where the `package.json` is: in a monorepo, the package you started Claude in. The git checks run from the repository's top folder. A check that times out keeps its previous lines rather than dropping them, and none of them can throw: a broken check never breaks the interface. A check that cannot run says why at the bottom of the pane: the command could not start (not installed, or not on the PATH the app sees), it timed out, or `npm audit` found no `package-lock.json`. The branch you have checked out never counts as stale.
 
 ## Why a mod and not a status line
 
