@@ -71,7 +71,7 @@ The last scan of each of your 20 most recent projects is saved on your machine, 
 
 **Opening a repo you don't trust.**
 
-- A project's own `.npmrc` can send npm to any host and fill its values from your environment variables, so a cloned repo could have npm hand your tokens to that host. npm has no option to ignore that file, so the mod **skips the npm checks in any project that has its own `.npmrc`** and says so in the pane. Run `npm audit` yourself there if you trust the file.
+- A project's own `.npmrc` can send npm to any host and fill its values from your environment variables, so a cloned repo could have npm hand your tokens to that host. npm has no option to ignore that file, so the mod **skips the npm checks in any project that has its own `.npmrc`** and says so in the pane. That includes an `.npmrc` in any folder between the package and the repo's top, since npm 10 reads a workspace root's file too; one above the repo's top is yours and does not count. Run `npm audit` yourself there if you trust the file.
 - A repo's `.git/config` can name programs for git to run. Every git command runs with `-c core.fsmonitor=false -c log.showSignature=false`, which keeps `git grep` and `git log` from starting one, and every npm command with `--git=git`.
 - Package names and versions are dropped unless they have npm's own format, and branch names are shown as plain ASCII, so text from the repo cannot carry control characters or sentences into the pane or a prompt. Counts can still be faked by a repo, so read a finding before you act on it.
 

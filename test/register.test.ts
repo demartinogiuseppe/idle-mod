@@ -233,6 +233,30 @@ test('a project with its own .npmrc never runs npm, and says so', async ($, on) 
   expect(await texts(ui)).toContain('1 stash sitting around')
 })
 
+// npm 10 in a workspace package reads the workspace root's .npmrc too.
+test('a workspace root .npmrc between the package and the repo top stops npm', async ($, on) => {
+  mock.store(on)
+  const calls: { argv: string[]; cwd?: string }[] = []
+  const files = ['/repo/.git', '/repo/mono/package.json', '/repo/mono/.npmrc', '/repo/mono/packages/a/package.json']
+  world(on, { root: '/repo/mono/packages/a', files, runs: demoRuns('/repo'), calls })
+
+  const ui = await scanned($)
+
+  expect(calls.filter((c) => c.argv[0] === 'npm')).toHaveLength(0)
+  expect(await texts(ui)).toContain('npm checks skipped: this project has its own .npmrc')
+})
+
+test('an .npmrc above the repo top is the person\'s own and does not stop npm', async ($, on) => {
+  mock.store(on)
+  const calls: { argv: string[]; cwd?: string }[] = []
+  const files = ['/home/.npmrc', '/home/repo/.git', '/home/repo/package.json']
+  world(on, { root: '/home/repo', files, runs: demoRuns('/home/repo'), calls })
+
+  await scanned($)
+
+  expect(calls.filter((c) => c.argv[0] === 'npm')).toHaveLength(2)
+})
+
 test('a forged version never reaches the fix prompt', async ($, on) => {
   mock.store(on)
   const runs = demoRuns('/demo')

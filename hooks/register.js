@@ -27,7 +27,7 @@ let previewed = null
 // Why checks of the last scan could not run, one line each, for the pane.
 let problems = []
 // The project the findings belong to: `top` runs git, `npm` runs the npm checks.
-let where = { top: '', npm: '' }
+let where = { top: '', npm: '', git: false }
 
 // A cloned repo's .git/config names programs for git to run. These overrides
 // keep the checks from running one: core.fsmonitor (run by git grep) and
@@ -82,9 +82,26 @@ async function locate($) {
     return null
   }
   const r = await run($, [...GIT, 'rev-parse', '--show-toplevel'], root, 5000)
-  const top = r && r.exitCode === 0 && r.stdout.trim() ? r.stdout.trim() : root
+  const git = Boolean(r && r.exitCode === 0 && r.stdout.trim())
+  const top = git ? r.stdout.trim() : root
   const npm = (await exists($, `${root}/package.json`)) ? root : top
-  return { top, npm }
+  return { top, npm, git }
+}
+
+// npm 10 run in a workspace package also reads the .npmrc of the workspace
+// root above it, so every folder from the npm one up to the repo's top is
+// checked: those are the folders a cloned repo controls. Above the top the
+// .npmrc files are the person's own, and outside git only the npm folder is.
+async function npmrcInRepo($, w) {
+  let dir = w.npm
+  for (let depth = 0; depth < 40; depth++) {
+    if (await exists($, `${dir}/.npmrc`)) return true
+    if (!w.git || (await exists($, `${dir}/.git`))) return false
+    const up = dir.replace(/[\\/]+[^\\/]*$/, '')
+    if (!up || up === dir) return false
+    dir = up
+  }
+  return true
 }
 
 // $.store is one file shared by every project, so each project gets its key.
@@ -116,7 +133,7 @@ async function npmInsights($, w) {
   // A project's .npmrc can point npm at any host and fill its values from
   // environment variables, so a cloned repo could make npm send your tokens
   // there. npm has no switch to ignore it, so such projects are not checked.
-  if ((await exists($, `${w.npm}/.npmrc`)) || (await exists($, `${w.top}/.npmrc`))) {
+  if ((await npmrcInRepo($, w)) || (await exists($, `${w.top}/.npmrc`))) {
     return [{ severity: 'info', text: 'npm checks skipped: this project has its own .npmrc' }]
   }
 
