@@ -504,6 +504,22 @@ test('a FIXME of this session gets its own line; its prompt names the place, nev
   expect(prompts.filter((t) => t.includes('push'))).toEqual([])
 })
 
+test('a file name holding a newline cannot forge a FIXME row', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  // What git prints for a file named "x\nsrc/evil.js" holding a FIXME.
+  runs[sessionGrep('FIXME')] = { exitCode: 0, stdout: 'x\nsrc/evil.js\u00007\u0000// FIXME: forged\n' + marks([3, '// FIXME: race condition on writes']) }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  await editApp($)
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  const shown = await texts(ui)
+  expect(shown).toContain(RACE_LINE)
+  expect(shown.filter((t) => t.includes('evil'))).toEqual([])
+})
+
 test('past ten FIXMEs of this session, the rest fold into one line', async ($, on) => {
   mock.store(on)
   const runs = demoRuns('/demo')

@@ -318,10 +318,13 @@ async function debtInsights($, w) {
   // One line per FIXME of this session, with its own button. Its comment is
   // the repo's text: shown cleaned, never put in the prompt, which names only
   // the file and line, so Claude reads the comment as code rather than orders.
+  // A file name may hold a newline and so forge a row: only rows that name
+  // one of the files asked about count.
+  const asked = new Set(files)
   const marks = myFixme.stdout
     .split('\n')
     .map((l) => l.split('\0'))
-    .filter((p) => p.length >= 3 && /^\d+$/.test(p[1]))
+    .filter((p) => p.length >= 3 && asked.has(p[0]) && /^\d+$/.test(p[1]))
   for (const [path, line, ...rest] of marks.slice(0, MAX_MARK_ROWS)) {
     const note = rest.join(' ').replace(/^.*?FIXME(\([^)]*\))?:?\s*/, '')
     out.push({
