@@ -52,7 +52,14 @@ const PKG_NAME = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]{0,213}$/
 const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.]{1,20})?(\+[0-9A-Za-z.]{1,20})?$/
 
 // Text from the repo that is shown but never sent: printable ASCII only.
-const safe = (s) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, 40)
+const safe = (s, max = 40) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, max)
+
+// Markers as comments write them: `FIXME:` or `FIXME(name)`, a git grep pattern.
+const MARK = { FIXME: 'FIXME[:(]', TODO: 'TODO[:(]' }
+// This session's FIXMEs get a line each, up to this many.
+const MAX_MARK_ROWS = 10
+// A file name that may go into a prompt: letters, digits and . _ - / only.
+const PLAIN_PATH = /^[A-Za-z0-9._\/-]{1,200}$/
 
 // --------------------------------------------------------------- collectors
 // Each collector returns a list of { severity, text, fix }, or { failed } with
@@ -271,19 +278,20 @@ async function debtInsights($, w) {
   if (!(await exists($, `${w.top}/.git`))) return []
 
   // git grep stays inside tracked files, so node_modules and build output
-  // never enter the count. It counts lines that hold the marker. The files
-  // changed this session are counted again on their own, new ones included,
-  // their names taken literally rather than as patterns.
+  // never enter the count. It counts lines that hold the marker as a comment
+  // writes it, `FIXME:` or `FIXME(`, not the bare word in a sentence. The
+  // files changed this session are searched again on their own, new ones
+  // included, their names taken literally rather than as patterns.
   const files = touchedIn(w)
-  const inFiles = (word) =>
+  const inFiles = (flags, word) =>
     files.length
-      ? run($, [...GIT, '--literal-pathspecs', 'grep', '-cI', '--untracked', '-e', word, '--', ...files], w.top, 10000)
+      ? run($, [...GIT, '--literal-pathspecs', 'grep', flags, '--untracked', '-e', word, '--', ...files], w.top, 10000)
       : { exitCode: 1, stdout: '' }
   const [fixme, todo, myFixme, myTodo] = await Promise.all([
-    run($, [...GIT, 'grep', '-cI', '-e', 'FIXME'], w.top, 10000),
-    run($, [...GIT, 'grep', '-cI', '-e', 'TODO'], w.top, 10000),
-    inFiles('FIXME'),
-    inFiles('TODO'),
+    run($, [...GIT, 'grep', '-cI', '-e', MARK.FIXME], w.top, 10000),
+    run($, [...GIT, 'grep', '-cI', '-e', MARK.TODO], w.top, 10000),
+    inFiles('-nIz', MARK.FIXME),
+    inFiles('-cI', MARK.TODO),
   ])
   const broken = [fixme, todo, myFixme, myTodo].find(failed)
   if (broken) return broken
@@ -307,16 +315,34 @@ async function debtInsights($, w) {
   }
   if (nTodo) out.push({ severity: 'info', text: `${nTodo} TODO marker${nTodo > 1 ? 's' : ''} across the project` })
 
-  const sFixme = total(myFixme)
-  const sTodo = total(myTodo)
-  if (sFixme) {
+  // One line per FIXME of this session, with its own button. Its comment is
+  // the repo's text: shown cleaned, never put in the prompt, which names only
+  // the file and line, so Claude reads the comment as code rather than orders.
+  const marks = myFixme.stdout
+    .split('\n')
+    .map((l) => l.split('\0'))
+    .filter((p) => p.length >= 3 && /^\d+$/.test(p[1]))
+  for (const [path, line, ...rest] of marks.slice(0, MAX_MARK_ROWS)) {
+    const note = rest.join(' ').replace(/^.*?FIXME(\([^)]*\))?:?\s*/, '')
     out.push({
       scope: 'session',
       severity: 'warn',
-      text: `${sFixme} FIXME marker${sFixme > 1 ? 's' : ''} in files changed this session`,
+      text: `FIXME ${safe(path, 60)}:${line} ${safe(note, 60)}`.trim(),
+      fix: PLAIN_PATH.test(path)
+        ? `Look at the FIXME at ${path}:${line}, tell me what it is about and propose a fix. Don't change anything until I say so.`
+        : 'Find the FIXME markers in the files you changed in this session and tell me which ones to fix now.',
+    })
+  }
+  const more = marks.length - MAX_MARK_ROWS
+  if (more > 0) {
+    out.push({
+      scope: 'session',
+      severity: 'warn',
+      text: `${more} more FIXME marker${more > 1 ? 's' : ''} in files changed this session`,
       fix: 'Find the FIXME markers in the files you changed in this session and tell me which ones to fix now.',
     })
   }
+  const sTodo = total(myTodo)
   if (sTodo) {
     out.push({ scope: 'session', severity: 'info', text: `${sTodo} TODO marker${sTodo > 1 ? 's' : ''} in files changed this session` })
   }
