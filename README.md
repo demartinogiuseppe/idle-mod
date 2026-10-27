@@ -10,17 +10,23 @@
 Click `details`, or run `/idle-mod`, and the pane opens. From the keyboard, `ctrl+x tab` moves focus to the band, then `i` opens it; while you are typing in the prompt, `i` is just a letter.
 
 ```
+[ All 3 ]  Security   Changes 1   Code 2
+
 This session · 3
-↑ 1 commit made this session, not pushed yet      [ 👁 ] [ Fix with Claude ]
-✱ FIXME src/app.js:3 race condition on writes      [ 👁 ] [ Fix with Claude ]
-○ 2 TODO markers in files changed this session
+  CHANGES
+  ↑ 1 commit made this session, not pushed yet      [ 👁 ] [ Fix with Claude ]
+  CODE
+  ✱ FIXME src/app.js:3 race condition on writes      [ 👁 ] [ Fix with Claude ]
+  ○ 2 TODO markers in files changed this session
 
 [ ▸ In the project · 5 ]
 
 ↻ rescan   scanned 4m ago
 ```
 
-Open **In the project** and its lines come grouped under Dependencies, Git and Code. Each kind of finding has its glyph, colored by how much it matters: ⚠ vulnerabilities, ⇡ major updates, ↑ unpushed commits, ≡ stashes, ⎇ stale branches, ✱ FIXME, ○ TODO, ± changes not committed, ⊕ new dependencies, ∅ code without a test change, ⚑ possible secrets. With nothing new, the session reads `✓ nothing new in this session.`
+The tabs along the top sort the work three ways: **Security** (possible secrets, npm vulnerabilities), **Changes** (what is not committed or not pushed, new dependencies, major updates, stashes, stale branches) and **Code** (FIXME, TODO, code changed with no test). A tab shows only its kind of line, in this session and in the project alike; **All** shows everything, grouped the same way.
+
+Open **In the project** for what was there before the session. Each kind of finding has its glyph, colored by how much it matters: ⚠ vulnerabilities, ⇡ major updates, ↑ unpushed commits, ≡ stashes, ⎇ stale branches, ✱ FIXME, ○ TODO, ± changes not committed, ⊕ new dependencies, ∅ code without a test change, ⚑ possible secrets. With nothing new, the session reads `✓ nothing new in this session.`
 
 **This session** lists only what the session itself brought: each FIXME in the files Claude edited or wrote here (new files included) on a line of its own, with file and line and a button for that one, the TODO count of those files, commits made here and not pushed yet, and npm findings that were not there at the session's first scan (after an install, say). The band above the prompt rotates through these lines only. Everything that was already in the project, such as old stashes, stale branches, the project-wide TODO count or a vulnerability that predates the session, sits under **In the project**, folded until you open it. Two sessions on the same project each see their own work.
 

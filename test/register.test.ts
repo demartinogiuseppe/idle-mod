@@ -490,13 +490,49 @@ test('the pane marks each kind of finding, groups the project\'s, and says when 
   const shown = await texts(ui)
 
   expect(shown).toContain('This session')
-  for (const title of ['Dependencies', 'Git', 'Code']) expect(shown).toContain(title)
+  for (const title of ['SECURITY', 'CHANGES', 'CODE']) expect(shown).toContain(title)
   // Each glyph is followed by U+FE0E, which asks for its text form.
   for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✱', '○']) expect(shown).toContain(glyph + '︎')
   const fix = (await ui.findAll({ type: 'Button', text: 'Fix with Claude' })) as any[]
   expect(fix.length).toBeGreaterThan(0)
   expect(JSON.stringify(fix[0])).toContain('primary')
   expect(JSON.stringify(await ui.find({ key: 'project' }))).toContain('▾ In the project · 7')
+})
+
+test('a tab shows only its kind of work, in both sections, and All brings everything back', async ($, on) => {
+  const { ui } = await edited($, on, {
+    contents: { '/demo/src/app.js': 'a\nb\n' },
+    runs: {
+      'git cat-file blob HEAD:src/app.js': { exitCode: 0, stdout: 'a\n' },
+      [sessionGrep('FIXME')]: RACE,
+    },
+  })
+  await ui.press({ key: 'project' })
+  const label = async (key: string) => JSON.stringify(await ui.find({ key }))
+  // This session: the uncommitted change (changes); the FIXME and the missing test (code).
+  expect(await label('tab-all')).toContain('All 3')
+  expect(await label('tab-all')).toContain('primary')
+  expect(await label('tab-security')).not.toContain('Security 0')
+  expect(await label('tab-changes')).toContain('Changes 1')
+  expect(await label('tab-code')).toContain('Code 2')
+
+  await ui.press({ key: 'tab-security' })
+  let shown = await texts(ui)
+  expect(await label('tab-security')).toContain('primary')
+  expect(shown).toContain('nothing under Security in this session.')
+  expect(shown).toContain('npm audit: 0 critical, 1 high severity')
+  expect(shown).not.toContain(RACE_LINE)
+  expect(shown).not.toContain('2 unpushed commits on this branch')
+
+  await ui.press({ key: 'tab-code' })
+  shown = await texts(ui)
+  expect(shown).toContain(RACE_LINE)
+  expect(shown).toContain('2 FIXME markers in tracked files')
+  expect(shown).not.toContain('npm audit: 0 critical, 1 high severity')
+
+  await ui.press({ key: 'tab-all' })
+  shown = await texts(ui)
+  for (const line of [RACE_LINE, 'npm audit: 0 critical, 1 high severity', '2 unpushed commits on this branch']) expect(shown).toContain(line)
 })
 
 test('markers in a file Claude edited this session are the session\'s', async ($, on) => {

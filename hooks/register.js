@@ -34,6 +34,8 @@ let where = { top: '', npm: '', git: false }
 let session = fresh()
 // Whether the pane shows the project's lines below this session's.
 let projectOpen = false
+// The pane's chosen tab: 'all', or one of TABS.
+let tab = 'all'
 
 function fresh() {
   return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, depsBefore: null, dirty: { git: false, npm: false } }
@@ -620,12 +622,28 @@ const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch
 // U+FE0E asks for the glyph as text: a desktop would otherwise draw some glyphs as
 // a colored emoji, deaf to the severity color.
 const icon = (item) => (ICON[item.kind] || '●') + '︎'
-// The project's lines, grouped by the check that found them.
-const GROUPS = [
-  ['npm', 'Dependencies'],
-  ['git', 'Git'],
-  ['debt', 'Code'],
+// The pane's tabs: every line belongs to one kind of work, in this order.
+const TABS = [
+  ['security', 'Security'],
+  ['changes', 'Changes'],
+  ['code', 'Code'],
 ]
+const CATEGORY = {
+  secret: 'security',
+  vuln: 'security',
+  skip: 'security',
+  uncommitted: 'changes',
+  unpushed: 'changes',
+  dep: 'changes',
+  update: 'changes',
+  stash: 'changes',
+  branch: 'changes',
+  fixme: 'code',
+  todo: 'code',
+  tests: 'code',
+}
+// A line saved by an older version has no kind: its check decides.
+const category = (item) => CATEGORY[item.kind] || (item.source === 'debt' ? 'code' : 'changes')
 
 const mine = () => insights.filter((item) => item.scope === 'session')
 
@@ -896,14 +914,44 @@ export function register(on) {
 
     // This session's lines first; the project's, there before the session
     // started or outside what it changed, folded below until asked for.
-    const ours = mine()
-    const theirs = insights.filter((item) => item.scope !== 'session')
+    // The chosen tab filters both sections; All shows each by kind of work.
+    const shown = (item) => tab === 'all' || category(item) === tab
+    const ours = mine().filter(shown)
+    const theirs = insights.filter((item) => item.scope !== 'session' && shown(item))
     const heading = (text) => Text({ children: [text], bold: true })
     const count = (n) => (n ? ` · ${n}` : '')
-    const groups = GROUPS.flatMap(([source, title]) => {
-      const lines = theirs.filter((item) => item.source === source)
-      return lines.length ? [Text({ children: [title], dimColor: true, bold: true }), ...lines.map(row)] : []
+    const grouped = (items) =>
+      tab !== 'all'
+        ? items.map(row)
+        : TABS.flatMap(([key, title]) => {
+            const lines = items.filter((item) => category(item) === key)
+            return lines.length ? [Text({ children: [title.toUpperCase()], dimColor: true, bold: true }), ...lines.map(row)] : []
+          })
+
+    // One tab per kind of work, each with how many lines this session holds.
+    const all = mine()
+    const tabs = Box({
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 1,
+      children: [['all', 'All'], ...TABS].map(([key, title]) => {
+        const n = key === 'all' ? all.length : all.filter((item) => category(item) === key).length
+        return Button({
+          key: 'tab-' + key,
+          label: n ? `${title} ${n}` : title,
+          ...(tab === key ? { variant: 'primary' } : {}),
+          onPress: async () => {
+            tab = key
+            redraw($)
+          },
+        })
+      }),
     })
+    const quiet =
+      tab === 'all'
+        ? empty
+        : Text({ children: [`nothing under ${TABS.find(([key]) => key === tab)[1]} in this session.`], dimColor: true })
+
     const project = theirs.length
       ? [
           Text({ children: [' '] }),
@@ -915,7 +963,7 @@ export function register(on) {
               redraw($)
             },
           }),
-          ...(projectOpen ? [Box({ flexDirection: 'column', paddingLeft: 2, children: groups })] : []),
+          ...(projectOpen ? [Box({ flexDirection: 'column', paddingLeft: 2, children: grouped(theirs) })] : []),
         ]
       : []
 
@@ -925,8 +973,10 @@ export function register(on) {
     return Box({
       flexDirection: 'column',
       children: [
+        tabs,
+        Text({ children: [' '] }),
         heading('This session' + count(ours.length)),
-        ...(ours.length ? ours.map(row) : [empty]),
+        ...(ours.length ? grouped(ours) : [quiet]),
         ...notes,
         ...project,
         Text({ children: [' '] }),
