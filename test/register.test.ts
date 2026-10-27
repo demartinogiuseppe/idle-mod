@@ -481,7 +481,8 @@ test('the pane marks each kind of finding, groups the project\'s, and says when 
 
   expect(shown).toContain('This session')
   for (const title of ['Dependencies', 'Git', 'Code']) expect(shown).toContain(title)
-  for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✎', '○']) expect(shown).toContain(glyph)
+  // Each glyph is followed by U+FE0E, which asks for its text form.
+  for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✎', '○']) expect(shown).toContain(glyph + '︎')
   const fix = (await ui.findAll({ type: 'Button', text: 'Fix with Claude' })) as any[]
   expect(fix.length).toBeGreaterThan(0)
   expect(JSON.stringify(fix[0])).toContain('primary')

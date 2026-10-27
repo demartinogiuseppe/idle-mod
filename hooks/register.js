@@ -614,7 +614,9 @@ const DOT = { high: 'red', warn: 'yellow', info: 'gray' }
 // One glyph per kind of finding, one column wide, colored by severity.
 // A line saved by an older version has no kind and keeps the dot.
 const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✎', todo: '○', skip: '⊘', uncommitted: '±', dep: '⊕', tests: '∅', secret: '⚑' }
-const icon = (item) => ICON[item.kind] || '●'
+// U+FE0E asks for the glyph as text: a desktop would otherwise draw ✎ or ⚑ as
+// a colored emoji, deaf to the severity color.
+const icon = (item) => (ICON[item.kind] || '●') + '︎'
 // The project's lines, grouped by the check that found them.
 const GROUPS = [
   ['npm', 'Dependencies'],
@@ -832,10 +834,12 @@ export function register(on) {
             flexDirection: 'row',
             flexShrink: 1,
             minWidth: 0,
+            flexWrap: 'nowrap',
             columnGap: 1,
             children: [
-              Text({ children: [icon(item)], color: DOT[item.severity] }),
-              Text({ children: [item.text], dimColor: item.severity === 'info' }),
+              // The glyph keeps its place beside the text, which wraps alone.
+              Box({ flexShrink: 0, children: [Text({ children: [icon(item)], color: DOT[item.severity] })] }),
+              Box({ flexShrink: 1, minWidth: 0, children: [Text({ children: [item.text], dimColor: item.severity === 'info' })] }),
             ],
           }),
           ...(item.fix
