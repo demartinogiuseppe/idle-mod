@@ -36,9 +36,11 @@ let session = fresh()
 let projectOpen = false
 // The pane's chosen tab: 'all', or one of TABS.
 let tab = 'all'
+// The lines the person chose to ignore in this project, by idOf, kept in $.store.
+let ignored = new Set()
 
 function fresh() {
-  return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, depsBefore: null, dirty: { git: false, npm: false } }
+  return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, depsBefore: new Map(), dirty: { git: false, npm: false } }
 }
 
 // A cloned repo's .git/config names programs for git to run. These overrides
@@ -128,6 +130,14 @@ async function npmrcInRepo($, w) {
 
 // $.store is one file shared by every project, so each project gets its key.
 const scanKey = (w) => 'lastScan:' + w.npm
+const ignoreKey = (w) => 'ignored:' + w.top
+const MAX_IGNORED = 200
+
+// What an ignored line is known by. Most lines by their text, so a line whose
+// numbers change comes back; a secret by its file and kind, a FIXME by its
+// file and comment, so that editing elsewhere in the file keeps them ignored.
+const idOf = (item) => item.id || `${item.kind}|${item.text}`
+const isIgnored = (item) => ignored.has(idOf(item))
 
 // Point the mod at the session's project. After /cd or a worktree move the
 // old project's lines go, and the new project's last scan shows right away.
@@ -140,7 +150,8 @@ async function follow($) {
   collectedAt = 0
   // Another project's npm lines say nothing about what this one had.
   session.npmBefore = null
-  session.depsBefore = null
+  session.depsBefore = new Map()
+  ignored = new Set()
   try {
     const saved = await $.store.get(scanKey(w))
     if (saved && Array.isArray(saved.insights)) {
@@ -151,6 +162,36 @@ async function follow($) {
   } catch {
     // no saved scan: the next one fills in
   }
+  try {
+    const ids = await $.store.get(ignoreKey(w))
+    if (Array.isArray(ids)) ignored = new Set(ids.filter((id) => typeof id === 'string'))
+  } catch {
+    // nothing ignored yet
+  }
+}
+
+// Hide a line in this project from now on, across sessions.
+async function ignore($, item) {
+  ignored.add(idOf(item))
+  previewed = null
+  redraw($)
+  try {
+    await $.store.set(ignoreKey(where), [...ignored].slice(-MAX_IGNORED))
+  } catch {
+    // kept for this session only
+  }
+}
+
+// Bring every ignored line back. A rescan finds the secrets the last one
+// left out for being ignored.
+async function unignoreAll($) {
+  ignored = new Set()
+  try {
+    await $.store.delete(ignoreKey(where))
+  } catch {
+    // nothing stored
+  }
+  await collect($, { npm: false })
 }
 
 async function npmInsights($, w) {
@@ -345,6 +386,7 @@ async function debtInsights($, w) {
       scope: 'session',
       kind: 'fixme',
       severity: 'warn',
+      id: `fixme|${path}|${note}`,
       text: `FIXME ${safe(path, 60)}:${line} ${safe(note, 60)}`.trim(),
       fix: PLAIN_PATH.test(path)
         ? `Look at the FIXME at ${path}:${line}, tell me what it is about and propose a fix. Don't change anything until I say so.`
@@ -419,10 +461,26 @@ async function readText($, path) {
   }
 }
 
-// The names in package.json's dependency lists, or null when it can't be read.
-async function depNames($, w) {
-  const text = await readText($, `${w.npm}/package.json`)
-  if (text === null) return null
+// The secrets a file's text may hold, by line.
+function secretsIn(text, file) {
+  const out = []
+  splitLines(text).forEach((line, i) => {
+    const hit = SECRETS.find(([, re]) => re.test(line))
+    if (hit) out.push({ file, line: i + 1, label: hit[0], id: `secret|${file}|${hit[0]}` })
+  })
+  return out
+}
+
+// Dependency names as each ecosystem writes them, checked before they reach
+// a prompt. Python's are compared in their normalized form (PEP 503).
+const PY_NAME = /^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/
+const CRATE_NAME = /^[A-Za-z0-9_-]{1,64}$/
+const pyName = (s) => {
+  const m = /^[ \t]*([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(s)
+  return m && PY_NAME.test(m[1]) ? m[1].toLowerCase().replace(/[-_.]+/g, '-') : null
+}
+
+function npmDeps(text) {
   try {
     const pkg = JSON.parse(text)
     const names = new Set()
@@ -438,26 +496,139 @@ async function depNames($, w) {
   }
 }
 
+function requirementsDeps(text) {
+  const names = new Set()
+  for (const line of splitLines(text)) {
+    // Options (-r, -e, --index-url) and comments name no package.
+    if (/^[ \t]*(-|#|$)/.test(line)) continue
+    const name = pyName(line)
+    if (name) names.add(name)
+  }
+  return names
+}
+
+// TOML, as far as dependency lists go: each [table] with its lines.
+function tomlTables(text) {
+  const tables = [{ name: '', body: [] }]
+  for (const raw of splitLines(text)) {
+    const line = raw.trim()
+    if (line.startsWith('#')) continue
+    const head = /^\[\[?([^\]]+)\]\]?$/.exec(line)
+    if (head) tables.push({ name: head[1].replace(/\s+/g, ''), body: [] })
+    else tables[tables.length - 1].body.push(line)
+  }
+  return tables.map((t) => ({ name: t.name, body: t.body.join('\n') }))
+}
+
+// The strings of the TOML array that opens at s[i], inline tables skipped,
+// and where it ends: the end of the text when it never closes.
+function tomlArray(s, i) {
+  const out = []
+  for (i++; i < s.length; i++) {
+    const c = s[i]
+    if (c === ']') break
+    if (c === '{' || c === '"' || c === "'") {
+      const j = s.indexOf(c === '{' ? '}' : c, i + 1)
+      if (j < 0) return { strings: out, end: s.length }
+      if (c !== '{') out.push(s.slice(i + 1, j))
+      i = j
+    }
+  }
+  return { strings: out, end: i }
+}
+
+// Each `key = [ ... ]` of a table body, as [key, strings]. The lines are
+// trimmed, and the patterns never cross one: a repo's file of blank lines
+// would otherwise cost them quadratic time.
+function tomlArrays(body) {
+  const out = []
+  const re = /(^|\n)["']?([A-Za-z0-9_.-]+)["']?[ \t]*=[ \t]*\[/g
+  let m
+  while ((m = re.exec(body))) {
+    // The next key is looked for past this array, so each character is read once.
+    const { strings, end } = tomlArray(body, re.lastIndex - 1)
+    out.push([m[2], strings])
+    re.lastIndex = end
+  }
+  return out
+}
+
+// The keys of a table body: `name = ...`.
+const tomlKeys = (body) => [...body.matchAll(/(^|\n)["']?([A-Za-z0-9_.-]+)["']?[ \t]*=/g)].map((m) => m[2])
+
+// PEP 621 lists, PEP 735 groups and Poetry's tables.
+function pyprojectDeps(text) {
+  const names = new Set()
+  const add = (n) => n && names.add(n)
+  for (const { name, body } of tomlTables(text)) {
+    if (name === 'project') {
+      for (const [key, list] of tomlArrays(body)) if (key === 'dependencies') list.forEach((s) => add(pyName(s)))
+    } else if (name === 'project.optional-dependencies' || name === 'dependency-groups') {
+      for (const [, list] of tomlArrays(body)) list.forEach((s) => add(pyName(s)))
+    } else if (/^tool\.poetry\.(group\.[^.]+\.)?(dev-)?dependencies$/.test(name)) {
+      for (const key of tomlKeys(body)) if (key !== 'python') add(pyName(key))
+    }
+  }
+  return names
+}
+
+// [dependencies], [dev-dependencies], [build-dependencies], with their
+// target and workspace forms, and the [dependencies.name] form.
+function cargoDeps(text) {
+  const names = new Set()
+  for (const { name, body } of tomlTables(text)) {
+    const one = /(^|\.)(dev-|build-)?dependencies\.([^.]+)$/.exec(name)
+    if (one) {
+      if (CRATE_NAME.test(one[3])) names.add(one[3])
+    } else if (/(^|\.)(dev-|build-)?dependencies$/.test(name)) {
+      for (const key of tomlKeys(body)) if (CRATE_NAME.test(key)) names.add(key)
+    }
+  }
+  return names
+}
+
+const MANIFESTS = [
+  ['package.json', npmDeps],
+  ['requirements.txt', requirementsDeps],
+  ['pyproject.toml', pyprojectDeps],
+  ['Cargo.toml', cargoDeps],
+]
+
+// The dependencies in the project's manifests that were not there at the
+// session's first scan. A manifest missing then counts as empty, so one
+// created this session brings all its names; one that can't be read or
+// parsed is left out until it can.
+async function addedDeps($, w) {
+  const added = new Set()
+  for (const [file, parse] of MANIFESTS) {
+    const path = `${w.npm}/${file}`
+    const text = await readText($, path)
+    const names = text !== null ? parse(text) : (await exists($, path)) ? null : new Set()
+    if (!names) continue
+    if (!session.depsBefore.has(file)) session.depsBefore.set(file, names)
+    const before = session.depsBefore.get(file)
+    for (const name of names) if (!before.has(name)) added.add(name)
+  }
+  return [...added]
+}
+
 async function workInsights($, w) {
   const out = []
   const files = touchedIn(w)
 
   // Dependencies added since the session's first scan, by Claude's edits or
-  // by an install. Names pass npm's own format before reaching a prompt.
-  const deps = await depNames($, w)
-  if (deps) {
-    if (!session.depsBefore) session.depsBefore = deps
-    const added = [...deps].filter((name) => !session.depsBefore.has(name))
-    if (added.length) {
-      const names = added.slice(0, 3).join(', ') + (added.length > 3 ? ` (+${added.length - 3} more)` : '')
-      out.push({
-        scope: 'session',
-        kind: 'dep',
-        severity: 'warn',
-        text: `${added.length} dependenc${added.length > 1 ? 'ies' : 'y'} added this session: ${names}`,
-        fix: `Review the dependencies added in this session (${names}): what each one is for, whether it is maintained, and whether we need it. Don't install or remove anything until I say so.`,
-      })
-    }
+  // by an install, in package.json, requirements.txt, pyproject.toml or
+  // Cargo.toml. Names pass their ecosystem's format before reaching a prompt.
+  const added = await addedDeps($, w)
+  if (added.length) {
+    const names = added.slice(0, 3).join(', ') + (added.length > 3 ? ` (+${added.length - 3} more)` : '')
+    out.push({
+      scope: 'session',
+      kind: 'dep',
+      severity: 'warn',
+      text: `${added.length} dependenc${added.length > 1 ? 'ies' : 'y'} added this session: ${names}`,
+      fix: `Review the dependencies added in this session (${names}): what each one is for, whether it is maintained, and whether we need it. Don't install or remove anything until I say so.`,
+    })
   }
 
   // Code changed with no test changed alongside it.
@@ -475,17 +646,12 @@ async function workInsights($, w) {
   // Each changed file against the last commit, and the secrets it may hold.
   const git = await exists($, `${w.top}/.git`)
   let changed = 0
-  let added = 0
-  let removed = 0
+  let plus = 0
+  let minus = 0
   const secrets = []
   for (const file of files.slice(0, MAX_DIFF_FILES)) {
     const now = await readText($, `${w.top}/${file}`)
-    if (now !== null) {
-      splitLines(now).forEach((text, i) => {
-        const hit = SECRETS.find(([, re]) => re.test(text))
-        if (hit) secrets.push({ file, line: i + 1, label: hit[0] })
-      })
-    }
+    if (now !== null) secrets.push(...secretsIn(now, file))
     if (!git) continue
     const blob = await run($, [...GIT, 'cat-file', 'blob', `HEAD:${file}`], w.top, 8000)
     if (failed(blob)) return blob
@@ -496,32 +662,35 @@ async function workInsights($, w) {
     if (before !== null && now !== null && a.join('\n') === b.join('\n')) continue
     const c = churn(a, b)
     changed++
-    added += c.added
-    removed += c.removed
+    plus += c.added
+    minus += c.removed
   }
   if (changed) {
     out.push({
       scope: 'session',
       kind: 'uncommitted',
       severity: 'warn',
-      text: `${changed} file${changed > 1 ? 's' : ''} changed this session, not committed (+${added} −${removed})`,
+      text: `${changed} file${changed > 1 ? 's' : ''} changed this session, not committed (+${plus} −${minus})`,
       fix: "Show me what you changed in this session that is not committed yet, summarize it, and propose how to split it into commits. Don't commit anything until I say so.",
     })
   }
 
   const anySecret = "Look for secrets in the files you changed in this session and tell me how to move them out of the code. Don't print any value, and don't commit or push anything until I say so."
-  for (const hit of secrets.slice(0, MAX_SECRET_ROWS)) {
+  // An ignored secret leaves room for the next one.
+  const live = secrets.filter((hit) => !ignored.has(hit.id))
+  for (const hit of live.slice(0, MAX_SECRET_ROWS)) {
     out.push({
       scope: 'session',
       kind: 'secret',
       severity: 'high',
+      id: hit.id,
       text: `possible ${hit.label} in ${safe(hit.file, 60)}:${hit.line}`,
       fix: PLAIN_PATH.test(hit.file)
         ? `Look at ${hit.file}:${hit.line}: it may hold a ${hit.label}. Tell me whether it is a real secret and how to move it out of the code. Don't print the value, and don't commit or push anything until I say so.`
         : anySecret,
     })
   }
-  const more = secrets.length - MAX_SECRET_ROWS
+  const more = live.length - MAX_SECRET_ROWS
   if (more > 0) {
     out.push({
       scope: 'session',
@@ -533,6 +702,28 @@ async function workInsights($, w) {
   }
   return out
 }
+
+// The secrets, not ignored, in the files Claude changed this session, read
+// from disk now rather than from the last scan.
+async function secretsNow($) {
+  const w = where
+  if (!w.top) return []
+  const hits = []
+  for (const file of touchedIn(w).slice(0, MAX_DIFF_FILES)) {
+    const text = await readText($, `${w.top}/${file}`)
+    if (text !== null) hits.push(...secretsIn(text, file).filter((hit) => !ignored.has(hit.id)))
+  }
+  return hits
+}
+
+// A Bash command that makes a commit: `git commit`, with or without options
+// between, also after `&&` or `;`. One search per part, so a long command
+// costs linear time.
+const isCommit = (command) =>
+  command.split(/[\n;&|]/).some((part) => {
+    const at = part.search(/\bgit\b/)
+    return at >= 0 && /\scommit\b/.test(part.slice(at))
+  })
 
 // The files changed this session inside this repo, relative to its top.
 function touchedIn(w) {
@@ -645,7 +836,7 @@ const CATEGORY = {
 // A line saved by an older version has no kind: its check decides.
 const category = (item) => CATEGORY[item.kind] || (item.source === 'debt' ? 'code' : 'changes')
 
-const mine = () => insights.filter((item) => item.scope === 'session')
+const mine = () => insights.filter((item) => item.scope === 'session' && !isIgnored(item))
 
 // The band rotates through this session's lines only.
 function current() {
@@ -750,6 +941,28 @@ export function register(on) {
     }).catch(passOn)
   }
 
+  // Claude's commits wait while a file it changed this session may hold a
+  // secret. The reason names the file, line and kind, never the value; an
+  // ignored secret lets the commit through. Where nothing draws there is no
+  // pane to ignore it from, so headless runs commit as they would.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!interactive || !isCommit(String(e.command || ''))) return next(e)
+    const hits = await secretsNow($)
+    if (!hits.length) return next(e)
+    const places = hits
+      .slice(0, 3)
+      // The reason reaches the model: an odd file name stays out of it.
+      .map((hit) => (PLAIN_PATH.test(hit.file) ? `${hit.file}:${hit.line} (${hit.label})` : `a file changed this session (${hit.label})`))
+      .join(', ')
+    const rest = hits.length > 3 ? ` and ${hits.length - 3} more` : ''
+    return {
+      deny:
+        `idle-mod stopped this commit: ${places}${rest} may hold a secret. ` +
+        "Don't print the value. Tell the person which line it is and propose how to move it out of the code. " +
+        "If it is not a real secret, they can press Ignore on its line in the idle-mod pane; then commit again. Don't try to commit another way.",
+    }
+  }).catch(passOn)
+
   // Commands that change commits or installed packages call for a rescan.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const result = await next(e)
@@ -757,6 +970,8 @@ export function register(on) {
       const command = String(e.command || '')
       if (/\bgit\s+(commit|merge|rebase|cherry-pick|revert|am|pull|reset|push)\b/.test(command)) session.dirty.git = true
       if (/\b(npm|pnpm|yarn)\s+(i|install|add|ci|update|up|upgrade|remove|rm|uninstall)\b/.test(command)) session.dirty.npm = true
+      // These write the manifests the session checks read.
+      if (/\b(uv|poetry|cargo)\s+(add|remove|rm)\b/.test(command)) session.dirty.git = true
     } catch {
       // bookkeeping only
     }
@@ -863,14 +1078,14 @@ export function register(on) {
               Box({ flexShrink: 1, minWidth: 0, children: [Text({ children: [item.text], dimColor: item.severity === 'info' })] }),
             ],
           }),
-          ...(item.fix
-            ? [
-                Box({
-                  flexDirection: 'row',
-                  flexShrink: 0,
-                  columnGap: 1,
-                  children: [
-                    // preview is the eye; fix is the button to press.
+          Box({
+            flexDirection: 'row',
+            flexShrink: 0,
+            columnGap: 1,
+            children: [
+              // preview is the eye; fix is the button to press.
+              ...(item.fix
+                ? [
                     Button({
                       key: 'preview-' + i,
                       label: previewed === item.text ? '✕' : '👁',
@@ -889,10 +1104,17 @@ export function register(on) {
                         await $.prompt.submit({ text: item.fix, asUser: true })
                       },
                     }),
-                  ],
-                }),
-              ]
-            : []),
+                  ]
+                : []),
+              Button({
+                key: 'ignore-' + i,
+                label: 'Ignore',
+                onPress: async () => {
+                  await ignore($, item)
+                },
+              }),
+            ],
+          }),
         ],
       })
       if (!item.fix || previewed !== item.text) return line
@@ -917,7 +1139,8 @@ export function register(on) {
     // The chosen tab filters both sections; All shows each by kind of work.
     const shown = (item) => tab === 'all' || category(item) === tab
     const ours = mine().filter(shown)
-    const theirs = insights.filter((item) => item.scope !== 'session' && shown(item))
+    const theirs = insights.filter((item) => item.scope !== 'session' && !isIgnored(item) && shown(item))
+    const hidden = ignored.size
     const heading = (text) => Text({ children: [text], bold: true })
     const count = (n) => (n ? ` · ${n}` : '')
     const grouped = (items) =>
@@ -994,6 +1217,18 @@ export function register(on) {
               },
             }),
             Text({ children: [status], dimColor: true }),
+            ...(hidden
+              ? [
+                  Button({
+                    key: 'unignore',
+                    label: `${hidden} ignored · show again`,
+                    plain: true,
+                    onPress: async () => {
+                      await unignoreAll($)
+                    },
+                  }),
+                ]
+              : []),
           ],
         }),
       ],

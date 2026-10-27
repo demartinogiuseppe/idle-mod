@@ -14,14 +14,14 @@ Click `details`, or run `/idle-mod`, and the pane opens. From the keyboard, `ctr
 
 This session · 3
   CHANGES
-  ↑ 1 commit made this session, not pushed yet      [ 👁 ] [ Fix with Claude ]
+  ↑ 1 commit made this session, not pushed yet      [ 👁 ] [ Fix with Claude ] [ Ignore ]
   CODE
-  ✱ FIXME src/app.js:3 race condition on writes      [ 👁 ] [ Fix with Claude ]
-  ○ 2 TODO markers in files changed this session
+  ✱ FIXME src/app.js:3 race condition on writes      [ 👁 ] [ Fix with Claude ] [ Ignore ]
+  ○ 2 TODO markers in files changed this session                        [ Ignore ]
 
 [ ▸ In the project · 5 ]
 
-↻ rescan   scanned 4m ago
+↻ rescan   scanned 4m ago   1 ignored · show again
 ```
 
 The tabs along the top sort the work three ways: **Security** (possible secrets, npm vulnerabilities), **Changes** (what is not committed or not pushed, new dependencies, major updates, stashes, stale branches) and **Code** (FIXME, TODO, code changed with no test). A tab shows only its kind of line, in this session and in the project alike; **All** shows everything, grouped the same way.
@@ -34,6 +34,10 @@ After a turn that edited files or ran `git commit`, the session lines are rescan
 
 👁 shows, under the line, the exact prompt that button would send; **Fix with Claude** closes the pane and submits it for you. The prompts ask Claude to look and propose; none of them tells it to install, push or change anything before you say so.
 
+**Ignore** hides a line in this project, in this session and the next ones. Most lines are known by their text, so one whose numbers change (a third unpushed commit, a new dependency) comes back. A possible secret is known by its file and kind, and a FIXME by its file and comment, so an edit elsewhere in the file keeps them hidden. `N ignored · show again`, next to rescan, brings them all back.
+
+**Commits wait for secrets.** When Claude runs `git commit` while a file it changed this session may hold a secret, the mod stops that command and tells Claude the file, line and kind (never the value), and to propose how to move it out of the code. A fake key in a test fixture? Press **Ignore** on its line and the next commit goes through. Only Claude's own commits are stopped: one you type in a terminal is yours. Where nothing is drawn there is no pane to ignore a line from, so headless runs commit as usual.
+
 ## What it detects
 
 | Collector | Findings |
@@ -41,7 +45,9 @@ After a turn that edited files or ran `git commit`, the session lines are rescan
 | npm | known vulnerabilities (`npm audit`), major version jumps (`npm outdated`) |
 | git | unpushed commits, forgotten stashes, branches untouched 30+ days |
 | codebase | TODO / FIXME counts, via `git grep` over tracked files only: lines where `FIXME:` or `FIXME(` comes right after a comment opener (`//`, `#`, `/*`, `*`, `--`, `;`, `<!--`), not the word in a sentence or in code that talks about it |
-| this session | what Claude changed and did not commit yet (files, lines added and removed), dependencies added since the session's first scan, source files changed with no test changed, and possible secrets (private keys; AWS, GitHub, Anthropic, OpenAI, Slack, Stripe and Google keys) in the files it changed |
+| this session | what Claude changed and did not commit yet (files, lines added and removed), dependencies added since the session's first scan (in `package.json`, `requirements.txt`, `pyproject.toml` with its PEP 621, PEP 735 and Poetry lists, and `Cargo.toml`), source files changed with no test changed, and possible secrets (private keys; AWS, GitHub, Anthropic, OpenAI, Slack, Stripe and Google keys) in the files it changed |
+
+A dependency counts once it is in a manifest: `npm install x`, `uv add x`, `poetry add x` and `cargo add x` write one, `pip install x` does not.
 
 The npm checks run where the `package.json` is: in a monorepo, the package you started Claude in. The git checks run from the repository's top folder. A check that times out keeps its previous lines rather than dropping them, and none of them can throw: a broken check never breaks the interface. A check that cannot run says why at the bottom of the pane: the command could not start (not installed, or not on the PATH the app sees), it timed out, or `npm audit` found no `package-lock.json`. The branch you have checked out never counts as stale.
 
@@ -83,13 +89,13 @@ No telemetry, no server of ours, no account. The briefings never call the model,
 
 What does leave your machine: in a project with a `package.json`, the mod runs `npm audit` and `npm outdated` when a session starts, and again when you start a turn or open the pane and the last scan is more than 30 minutes old. Like running those commands yourself, they send your dependency names and versions to the npm registry in your npm configuration. Everything else (git and the TODO/FIXME count) stays local.
 
-The last scan of each of your 20 most recent projects is saved on your machine, under Claude Code's configuration folder, so the next session can show it right away. It holds the project's path and the finding lines, nothing else.
+The last scan of each of your 20 most recent projects is saved on your machine, under Claude Code's configuration folder, so the next session can show it right away. It holds the project's path and the finding lines, nothing else. The lines you ignore are saved there too, per project: the line's text, or a secret's file and kind.
 
 **Opening a repo you don't trust.**
 
 - A project's own `.npmrc` can send npm to any host and fill its values from your environment variables, so a cloned repo could have npm hand your tokens to that host. npm has no option to ignore that file, so the mod **skips the npm checks in any project that has its own `.npmrc`** and says so in the pane. That includes an `.npmrc` in any folder between the package and the repo's top, since npm 10 reads a workspace root's file too; one above the repo's top is yours and does not count. Run `npm audit` yourself there if you trust the file.
 - A repo's `.git/config` can name programs for git to run. Every git command runs with `-c core.fsmonitor=false -c log.showSignature=false -c submodule.recurse=false`, which keeps `git grep` and `git log` from starting one and git out of submodules the repo brings along, and every npm command with `--git=git`. The names of the files changed this session reach `git grep` after `--` with `--literal-pathspecs`, so a file name is never read as a pattern or an option. A FIXME's comment is the repo's text: the pane shows it as plain ASCII, cut short, and its **Fix with Claude** prompt names only the file and line, never the comment, so a comment cannot write the prompt. What the session changed is compared with the last commit through `git cat-file`, which reads git's own objects, never with `git diff` or `git status`, which would run a repo's filters on your files. A possible secret is shown by its kind, file and line only: its value is never drawn, saved or put in a prompt.
-- Package names and versions are dropped unless they have npm's own format, and branch names are shown as plain ASCII, so text from the repo cannot carry control characters or sentences into the pane or a prompt. Counts can still be faked by a repo, so read a finding before you act on it.
+- Package names and versions are dropped unless they have their ecosystem's own format (npm, PyPI, crates.io), and branch names are shown as plain ASCII, so text from the repo cannot carry control characters or sentences into the pane or a prompt. Counts can still be faked by a repo, so read a finding before you act on it.
 
 One thing to know before you install this or any other mod: **mods are not sandboxed.** Through Claude Code they can run programs and read files on your machine. Read the source before you trust it — it's one file, `hooks/register.js`, and you can list what it does without running it:
 
