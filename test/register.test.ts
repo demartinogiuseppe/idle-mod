@@ -87,13 +87,14 @@ const demoRuns = (top: string): Record<string, Run> => ({
 
 const demoFiles = (top: string) => [`${top}/package.json`, `${top}/.git`]
 
+// In the pane's order: grouped by check, the worst first within each.
 const SEVEN = [
   'npm audit: 0 critical, 1 high severity',
   'major update: chalk 4.1.2 → 6.0.1',
   '2 unpushed commits on this branch',
-  '2 FIXME markers in tracked files',
   '1 stash sitting around',
   '1 branch untouched 30+ days (e.g. old-experiment)',
+  '2 FIXME markers in tracked files',
   '3 TODO markers across the project',
 ]
 
@@ -112,7 +113,7 @@ const texts = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'T
 async function rescan(ui: any) {
   await ui.press({ key: 'rescan' })
   const fold = await ui.find({ key: 'project' })
-  if (fold && JSON.stringify(fold).includes('show the project lines')) await ui.press({ key: 'project' })
+  if (fold && JSON.stringify(fold).includes('▸ In the project')) await ui.press({ key: 'project' })
 }
 
 // Mount the pane and run one scan to the end.
@@ -135,7 +136,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const shown = (await texts(ui)).filter((t) => SEVEN.includes(t))
     expect(shown).toEqual(SEVEN)
     // Only lines with a fix carry a button: the high and warn ones.
-    expect(await ui.findAll({ type: 'Button', text: 'fix with Claude' })).toHaveLength(4)
+    expect(await ui.findAll({ type: 'Button', text: 'Fix with Claude' })).toHaveLength(4)
   })
 }
 
@@ -454,10 +455,30 @@ test('a fresh session shows nothing of its own, and folds the project lines', as
 
   expect(shown).toContain('nothing new in this session.')
   expect(shown.filter((t) => SEVEN.includes(t))).toEqual([])
-  expect(JSON.stringify(await ui.find({ key: 'project' }))).toContain('show the project lines (7)')
+  expect(JSON.stringify(await ui.find({ key: 'project' }))).toContain('▸ In the project · 7')
 
   await ui.press({ key: 'project' })
   expect((await texts(ui)).filter((t) => SEVEN.includes(t))).toEqual(SEVEN)
+})
+
+test('the pane marks each kind of finding, groups the project\'s, and says when all is clear', async ($, on) => {
+  mock.store(on)
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs: demoRuns('/demo') })
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  expect(await texts(ui)).toContain('✓')
+  await ui.press({ key: 'project' })
+  const shown = await texts(ui)
+
+  expect(shown).toContain('This session')
+  for (const title of ['Dependencies', 'Git', 'Code']) expect(shown).toContain(title)
+  for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✎', '○']) expect(shown).toContain(glyph)
+  const fix = (await ui.findAll({ type: 'Button', text: 'Fix with Claude' })) as any[]
+  expect(fix.length).toBeGreaterThan(0)
+  expect(JSON.stringify(fix[0])).toContain('primary')
+  expect(JSON.stringify(await ui.find({ key: 'project' }))).toContain('▾ In the project · 7')
 })
 
 test('markers in a file Claude edited this session are the session\'s', async ($, on) => {

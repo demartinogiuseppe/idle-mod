@@ -157,7 +157,7 @@ async function npmInsights($, w) {
   // environment variables, so a cloned repo could make npm send your tokens
   // there. npm has no switch to ignore it, so such projects are not checked.
   if ((await npmrcInRepo($, w)) || (await exists($, `${w.top}/.npmrc`))) {
-    return [{ severity: 'info', text: 'npm checks skipped: this project has its own .npmrc' }]
+    return [{ kind: 'skip', severity: 'info', text: 'npm checks skipped: this project has its own .npmrc' }]
   }
 
   const [audit, outdated] = await Promise.all([
@@ -177,12 +177,13 @@ async function npmInsights($, w) {
     const moderate = Number(vulns.moderate) || 0
     if (critical + high > 0) {
       out.push({
+        kind: 'vuln',
         severity: 'high',
         text: `npm audit: ${critical} critical, ${high} high severity`,
         fix: "Run npm audit, explain each high or critical finding and propose a fix for each. Don't change or install anything until I say so.",
       })
     } else if (moderate) {
-      out.push({ severity: 'info', text: `npm audit: ${moderate} moderate, nothing critical` })
+      out.push({ kind: 'vuln', severity: 'info', text: `npm audit: ${moderate} moderate, nothing critical` })
     }
   } catch {
     return { failed: 'npm audit gave no report' }
@@ -204,6 +205,7 @@ async function npmInsights($, w) {
         const [name, d] = majors[0]
         const rest = majors.length > 1 ? ` (+${majors.length - 1} more)` : ''
         out.push({
+          kind: 'update',
           severity: 'warn',
           text: `major update: ${name} ${d.current} → ${d.latest}${rest}`,
           fix: `Check what would break if ${name} went from ${d.current} to ${d.latest}. Tell me first; don't change or install anything until I say so.`,
@@ -239,6 +241,7 @@ async function gitInsights($, w) {
   const n = count(ahead)
   if (n > 0) {
     out.push({
+      kind: 'unpushed',
       severity: 'warn',
       text: `${n} unpushed commit${n > 1 ? 's' : ''} on this branch`,
       fix: "Show me the unpushed commits on this branch and tell me whether they look ready to push. Don't push anything until I say so.",
@@ -248,6 +251,7 @@ async function gitInsights($, w) {
   if (m > 0) {
     out.push({
       scope: 'session',
+      kind: 'unpushed',
       severity: 'warn',
       text: `${m} commit${m > 1 ? 's' : ''} made this session, not pushed yet`,
       fix: "Show me the commits made in this session that are not pushed yet and tell me whether they look ready to push. Don't push anything until I say so.",
@@ -255,7 +259,7 @@ async function gitInsights($, w) {
   }
 
   const stashes = stash.stdout.trim() ? stash.stdout.trim().split('\n').length : 0
-  if (stashes) out.push({ severity: 'info', text: `${stashes} stash${stashes > 1 ? 'es' : ''} sitting around` })
+  if (stashes) out.push({ kind: 'stash', severity: 'info', text: `${stashes} stash${stashes > 1 ? 'es' : ''} sitting around` })
 
   // A branch name may hold `|`, so it goes last; the checked-out one never counts.
   const cutoff = Date.now() / 1000 - 30 * 86400
@@ -269,6 +273,7 @@ async function gitInsights($, w) {
     .filter((b) => b.name && b.head !== '*' && b.at < cutoff)
   if (stale.length) {
     out.push({
+      kind: 'branch',
       severity: 'info',
       text: `${stale.length} branch${stale.length > 1 ? 'es' : ''} untouched 30+ days (e.g. ${safe(stale[0].name)})`,
     })
@@ -310,12 +315,13 @@ async function debtInsights($, w) {
   const nTodo = total(todo)
   if (nFixme) {
     out.push({
+      kind: 'fixme',
       severity: 'warn',
       text: `${nFixme} FIXME marker${nFixme > 1 ? 's' : ''} in tracked files`,
       fix: 'Find the FIXME markers, group them by theme, and tell me which ones are worth fixing now.',
     })
   }
-  if (nTodo) out.push({ severity: 'info', text: `${nTodo} TODO marker${nTodo > 1 ? 's' : ''} across the project` })
+  if (nTodo) out.push({ kind: 'todo', severity: 'info', text: `${nTodo} TODO marker${nTodo > 1 ? 's' : ''} across the project` })
 
   // One line per FIXME of this session, with its own button. Its comment is
   // the repo's text: shown cleaned, never put in the prompt, which names only
@@ -331,6 +337,7 @@ async function debtInsights($, w) {
     const note = rest.join(' ').replace(/^.*?FIXME(\([^)]*\))?:?\s*/, '')
     out.push({
       scope: 'session',
+      kind: 'fixme',
       severity: 'warn',
       text: `FIXME ${safe(path, 60)}:${line} ${safe(note, 60)}`.trim(),
       fix: PLAIN_PATH.test(path)
@@ -342,6 +349,7 @@ async function debtInsights($, w) {
   if (more > 0) {
     out.push({
       scope: 'session',
+      kind: 'fixme',
       severity: 'warn',
       text: `${more} more FIXME marker${more > 1 ? 's' : ''} in files changed this session`,
       fix: 'Find the FIXME markers in the files you changed in this session and tell me which ones to fix now.',
@@ -349,7 +357,7 @@ async function debtInsights($, w) {
   }
   const sTodo = total(myTodo)
   if (sTodo) {
-    out.push({ scope: 'session', severity: 'info', text: `${sTodo} TODO marker${sTodo > 1 ? 's' : ''} in files changed this session` })
+    out.push({ scope: 'session', kind: 'todo', severity: 'info', text: `${sTodo} TODO marker${sTodo > 1 ? 's' : ''} in files changed this session` })
   }
   return out
 }
@@ -436,6 +444,16 @@ function isStale() {
 // ------------------------------------------------------------------ drawing
 
 const DOT = { high: 'red', warn: 'yellow', info: 'gray' }
+// One glyph per kind of finding, one column wide, colored by severity.
+// A line saved by an older version has no kind and keeps the dot.
+const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✎', todo: '○', skip: '⊘' }
+const icon = (item) => ICON[item.kind] || '●'
+// The project's lines, grouped by the check that found them.
+const GROUPS = [
+  ['npm', 'Dependencies'],
+  ['git', 'Git'],
+  ['debt', 'Code'],
+]
 
 const mine = () => insights.filter((item) => item.scope === 'session')
 
@@ -574,7 +592,7 @@ export function register(on) {
       flexDirection: 'row',
       columnGap: 1,
       children: [
-        Text({ children: ['◈'], color: DOT[item.severity] }),
+        Text({ children: [icon(item)], color: DOT[item.severity] }),
         Text({ children: [item.text], dimColor: item.severity === 'info' }),
         Button({
           key: 'open-pane',
@@ -599,9 +617,14 @@ export function register(on) {
 
     // An empty pane keeps the rescan row below, so a scan can always be rerun.
     const done = problems.length ? 'nothing new from the checks that ran.' : 'nothing new in this session.'
-    const empty = Text({
-      children: [collecting ? 'scanning…' : collectedAt ? done : 'not scanned yet.'],
-      dimColor: true,
+    const clear = collectedAt && !collecting && !problems.length
+    const empty = Box({
+      flexDirection: 'row',
+      columnGap: 1,
+      children: [
+        ...(clear ? [Text({ children: ['✓'], color: 'green' })] : []),
+        Text({ children: [collecting ? 'scanning…' : collectedAt ? done : 'not scanned yet.'], dimColor: true }),
+      ],
     })
 
     // Checks that could not run say so, instead of leaving the pane silent,
@@ -644,7 +667,7 @@ export function register(on) {
             minWidth: 0,
             columnGap: 1,
             children: [
-              Text({ children: ['●'], color: DOT[item.severity] }),
+              Text({ children: [icon(item)], color: DOT[item.severity] }),
               Text({ children: [item.text], dimColor: item.severity === 'info' }),
             ],
           }),
@@ -655,9 +678,10 @@ export function register(on) {
                   flexShrink: 0,
                   columnGap: 1,
                   children: [
+                    // preview is the eye; fix is the button to press.
                     Button({
                       key: 'preview-' + i,
-                      label: previewed === item.text ? 'hide' : 'preview',
+                      label: previewed === item.text ? '✕' : '👁',
                       onPress: async () => {
                         previewed = previewed === item.text ? null : item.text
                         redraw($)
@@ -665,7 +689,8 @@ export function register(on) {
                     }),
                     Button({
                       key: 'fix-' + i,
-                      label: 'fix with Claude',
+                      label: 'Fix with Claude',
+                      variant: 'primary',
                       onPress: async () => {
                         previewed = null
                         await $.ui.close({ id: PANE })
@@ -687,7 +712,7 @@ export function register(on) {
             flexDirection: 'column',
             paddingLeft: 2,
             children: [
-              Text({ children: ['fix with Claude sends this prompt:'], dimColor: true }),
+              Text({ children: ['Fix with Claude sends this prompt:'], dimColor: true }),
               Text({ children: [item.fix] }),
             ],
           }),
@@ -700,18 +725,23 @@ export function register(on) {
     const ours = mine()
     const theirs = insights.filter((item) => item.scope !== 'session')
     const heading = (text) => Text({ children: [text], bold: true })
+    const count = (n) => (n ? ` · ${n}` : '')
+    const groups = GROUPS.flatMap(([source, title]) => {
+      const lines = theirs.filter((item) => item.source === source)
+      return lines.length ? [Text({ children: [title], dimColor: true, bold: true }), ...lines.map(row)] : []
+    })
     const project = theirs.length
       ? [
           Text({ children: [' '] }),
           Button({
             key: 'project',
-            label: projectOpen ? 'hide the project lines' : `show the project lines (${theirs.length})`,
+            label: `${projectOpen ? '▾' : '▸'} In the project${count(theirs.length)}`,
             onPress: async () => {
               projectOpen = !projectOpen
               redraw($)
             },
           }),
-          ...(projectOpen ? [heading('In the project'), ...theirs.map(row)] : []),
+          ...(projectOpen ? [Box({ flexDirection: 'column', paddingLeft: 2, children: groups })] : []),
         ]
       : []
 
@@ -721,7 +751,7 @@ export function register(on) {
     return Box({
       flexDirection: 'column',
       children: [
-        heading('This session'),
+        heading('This session' + count(ours.length)),
         ...(ours.length ? ours.map(row) : [empty]),
         ...notes,
         ...project,
@@ -732,7 +762,7 @@ export function register(on) {
           children: [
             Button({
               key: 'rescan',
-              label: 'rescan',
+              label: '↻ rescan',
               hotkey: 'r',
               plain: true,
               onPress: async () => {
