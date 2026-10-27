@@ -32,7 +32,7 @@ After a turn that edited files or ran `git commit`, the session lines are rescan
 |---|---|
 | npm | known vulnerabilities (`npm audit`), major version jumps (`npm outdated`) |
 | git | unpushed commits, forgotten stashes, branches untouched 30+ days |
-| codebase | TODO / FIXME counts, via `git grep` over tracked files only: lines holding `FIXME:` or `FIXME(`, as a comment writes it, not the bare word in a sentence |
+| codebase | TODO / FIXME counts, via `git grep` over tracked files only: lines where `FIXME:` or `FIXME(` comes right after a comment opener (`//`, `#`, `/*`, `*`, `--`, `;`, `<!--`), not the word in a sentence or in code that talks about it |
 
 The npm checks run where the `package.json` is: in a monorepo, the package you started Claude in. The git checks run from the repository's top folder. A check that times out keeps its previous lines rather than dropping them, and none of them can throw: a broken check never breaks the interface. A check that cannot run says why at the bottom of the pane: the command could not start (not installed, or not on the PATH the app sees), it timed out, or `npm audit` found no `package-lock.json`. The branch you have checked out never counts as stale.
 

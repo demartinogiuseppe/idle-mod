@@ -54,8 +54,10 @@ const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.]{1,20})?(\+[0-9A-Za-z.]{1,20})?$/
 // Text from the repo that is shown but never sent: printable ASCII only.
 const safe = (s, max = 40) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, max)
 
-// Markers as comments write them: `FIXME:` or `FIXME(name)`, a git grep pattern.
-const MARK = { FIXME: 'FIXME[:(]', TODO: 'TODO[:(]' }
+// Markers as comments write them: right after `//`, `#`, `/*`, `*`, `--`, `;`
+// or `<!--`, as `FIXME:` or `FIXME(name)`. git grep -E patterns.
+const OPENER = '(//|#|/\\*|\\*|--|;|<!--)[[:space:]]*'
+const MARK = { FIXME: OPENER + 'FIXME[:(]', TODO: OPENER + 'TODO[:(]' }
 // This session's FIXMEs get a line each, up to this many.
 const MAX_MARK_ROWS = 10
 // A file name that may go into a prompt: letters, digits and . _ - / only.
@@ -288,10 +290,10 @@ async function debtInsights($, w) {
       ? run($, [...GIT, '--literal-pathspecs', 'grep', flags, '--untracked', '-e', word, '--', ...files], w.top, 10000)
       : { exitCode: 1, stdout: '' }
   const [fixme, todo, myFixme, myTodo] = await Promise.all([
-    run($, [...GIT, 'grep', '-cI', '-e', MARK.FIXME], w.top, 10000),
-    run($, [...GIT, 'grep', '-cI', '-e', MARK.TODO], w.top, 10000),
-    inFiles('-nIz', MARK.FIXME),
-    inFiles('-cI', MARK.TODO),
+    run($, [...GIT, 'grep', '-cIE', '-e', MARK.FIXME], w.top, 10000),
+    run($, [...GIT, 'grep', '-cIE', '-e', MARK.TODO], w.top, 10000),
+    inFiles('-nIzE', MARK.FIXME),
+    inFiles('-cIE', MARK.TODO),
   ])
   const broken = [fixme, todo, myFixme, myTodo].find(failed)
   if (broken) return broken
@@ -632,11 +634,14 @@ export function register(on) {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
+        flexWrap: 'nowrap',
         columnGap: 2,
         children: [
+          // A long finding wraps within its own column; the buttons never move.
           Box({
             flexDirection: 'row',
             flexShrink: 1,
+            minWidth: 0,
             columnGap: 1,
             children: [
               Text({ children: ['●'], color: DOT[item.severity] }),
@@ -647,6 +652,7 @@ export function register(on) {
             ? [
                 Box({
                   flexDirection: 'row',
+                  flexShrink: 0,
                   columnGap: 1,
                   children: [
                     Button({

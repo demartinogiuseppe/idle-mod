@@ -59,6 +59,9 @@ function world(on: On, w: World) {
 const now = Math.floor(Date.now() / 1000)
 const daysAgo = (d: number) => now - d * 86400
 
+// The marker patterns the mod hands git grep -E.
+const MARK = (word: string) => String.raw`(//|#|/\*|\*|--|;|<!--)[[:space:]]*` + word + '[:(]'
+
 const REFS = 'git for-each-ref --sort=committerdate --format=%(HEAD)|%(committerdate:unix)|%(refname:short) refs/heads/'
 
 // What the commands print in the project make-demo.sh builds.
@@ -78,8 +81,8 @@ const demoRuns = (top: string): Record<string, Run> => ({
   'git rev-list --count @{u}..HEAD': { exitCode: 0, stdout: '2\n' },
   'git stash list': { exitCode: 0, stdout: 'stash@{0}: WIP on main: d4e5f6 wip 1\n' },
   [REFS]: { exitCode: 0, stdout: ` |${daysAgo(45)}|old-experiment\n*|${daysAgo(0)}|main\n` },
-  'git grep -cI -e FIXME[:(]': { exitCode: 0, stdout: 'src/app.js:1\nsrc/utils.js:1\n' },
-  'git grep -cI -e TODO[:(]': { exitCode: 0, stdout: 'src/app.js:2\nsrc/utils.js:1\n' },
+  [`git grep -cIE -e ${MARK('FIXME')}`]: { exitCode: 0, stdout: 'src/app.js:1\nsrc/utils.js:1\n' },
+  [`git grep -cIE -e ${MARK('TODO')}`]: { exitCode: 0, stdout: 'src/app.js:2\nsrc/utils.js:1\n' },
 })
 
 const demoFiles = (top: string) => [`${top}/package.json`, `${top}/.git`]
@@ -209,7 +212,7 @@ test('a check that times out keeps its previous lines instead of dropping them',
   expect(await texts(ui)).toContain('1 stash sitting around')
 
   w.fail!.add('git stash list')
-  w.runs['git grep -cI -e TODO[:(]'] = { exitCode: 0, stdout: 'src/app.js:5\n' }
+  w.runs[`git grep -cIE -e ${MARK('TODO')}`] = { exitCode: 0, stdout: 'src/app.js:5\n' }
   await rescan(ui)
 
   const shown = await texts(ui)
@@ -432,7 +435,7 @@ test('opening the pane wakes a session that looked headless at start', async ($,
 
 // What the session-only greps print once Claude has edited src/app.js.
 const sessionGrep = (word: string) =>
-  `git --literal-pathspecs grep ${word === 'FIXME' ? '-nIz' : '-cI'} --untracked -e ${word}[:(] -- src/app.js`
+  `git --literal-pathspecs grep ${word === 'FIXME' ? '-nIzE' : '-cIE'} --untracked -e ${MARK(word)} -- src/app.js`
 // git grep -nz prints file, line and text split by NULs.
 const marks = (...lines: [number, string][]) => lines.map(([n, t]) => `src/app.js\0${n}\0${t}\n`).join('')
 const RACE = { exitCode: 0, stdout: marks([3, '// FIXME: race condition on writes']) }
