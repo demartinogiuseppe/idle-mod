@@ -9,7 +9,7 @@ const KEEP_PROJECTS = 20
 
 // Severity sets the order in the pane; the band rotates through every line.
 const SEV = { high: 0, warn: 1, info: 2 }
-const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count' }
+const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count', work: 'session checks' }
 // What to do when a command the checks need cannot start.
 const HELP = {
   git: { install: 'Install Git, then restart Claude Code.', href: 'https://git-scm.com/downloads', label: 'git-scm.com/downloads' },
@@ -36,7 +36,7 @@ let session = fresh()
 let projectOpen = false
 
 function fresh() {
-  return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, dirty: { git: false, npm: false } }
+  return { since: Math.floor(Date.now() / 1000), touched: new Set(), npmBefore: null, depsBefore: null, dirty: { git: false, npm: false } }
 }
 
 // A cloned repo's .git/config names programs for git to run. These overrides
@@ -138,6 +138,7 @@ async function follow($) {
   collectedAt = 0
   // Another project's npm lines say nothing about what this one had.
   session.npmBefore = null
+  session.depsBefore = null
   try {
     const saved = await $.store.get(scanKey(w))
     if (saved && Array.isArray(saved.insights)) {
@@ -362,6 +363,172 @@ async function debtInsights($, w) {
   return out
 }
 
+// ------------------------------------------------- what this session left
+// Read from the files Claude changed and from git's objects only: git diff
+// and git status would run the repo's own filters and diff drivers on them.
+
+const SOURCE = /\.(c|cc|cpp|cs|cjs|go|h|hpp|java|js|jsx|kt|mjs|php|py|rb|rs|scala|svelte|swift|ts|tsx|vue)$/i
+const TEST = /(^|\/)(tests?|__tests__|specs?)\/|[._-](test|spec)\.[^/]+$|(^|\/)test_[^/]+\.py$/i
+// What a secret looks like, the first match naming it. The value itself is
+// never shown, stored or sent: only its kind, file and line.
+const SECRETS = [
+  ['private key', /-----BEGIN ([A-Z]+ )?PRIVATE KEY-----/],
+  ['AWS access key', /AKIA[0-9A-Z]{16}/],
+  ['GitHub token', /gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}/],
+  ['Anthropic API key', /sk-ant-[A-Za-z0-9_-]{20,}/],
+  ['OpenAI API key', /sk-(proj-)?[A-Za-z0-9_-]{32,}/],
+  ['Slack token', /xox[abprs]-[A-Za-z0-9-]{10,}/],
+  ['Stripe live key', /[rs]k_live_[A-Za-z0-9]{20,}/],
+  ['Google API key', /AIza[0-9A-Za-z_-]{35}/],
+]
+const MAX_SECRET_ROWS = 5
+// Files compared with the last commit, and how big a file may be to read.
+const MAX_DIFF_FILES = 50
+const MAX_READ = 1000000
+
+// Lines as git counts them: a final newline ends the last line, it adds none.
+const splitLines = (s) => s.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n')
+
+// Lines added and removed, counted as a multiset: close to git's numbers for
+// an ordinary edit, and cheap.
+function churn(before, after) {
+  const left = new Map()
+  for (const l of before) left.set(l, (left.get(l) || 0) + 1)
+  let added = 0
+  for (const l of after) {
+    const n = left.get(l) || 0
+    if (n) left.set(l, n - 1)
+    else added++
+  }
+  let removed = 0
+  for (const n of left.values()) removed += n
+  return { added, removed }
+}
+
+async function readText($, path) {
+  try {
+    const text = await $.fs.read(path)
+    return typeof text === 'string' && text.length <= MAX_READ && !text.includes('\0') ? text : null
+  } catch {
+    return null
+  }
+}
+
+// The names in package.json's dependency lists, or null when it can't be read.
+async function depNames($, w) {
+  const text = await readText($, `${w.npm}/package.json`)
+  if (text === null) return null
+  try {
+    const pkg = JSON.parse(text)
+    const names = new Set()
+    for (const list of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+      const deps = pkg && pkg[list]
+      if (deps && typeof deps === 'object' && !Array.isArray(deps)) {
+        for (const name of Object.keys(deps)) if (PKG_NAME.test(name)) names.add(name)
+      }
+    }
+    return names
+  } catch {
+    return null
+  }
+}
+
+async function workInsights($, w) {
+  const out = []
+  const files = touchedIn(w)
+
+  // Dependencies added since the session's first scan, by Claude's edits or
+  // by an install. Names pass npm's own format before reaching a prompt.
+  const deps = await depNames($, w)
+  if (deps) {
+    if (!session.depsBefore) session.depsBefore = deps
+    const added = [...deps].filter((name) => !session.depsBefore.has(name))
+    if (added.length) {
+      const names = added.slice(0, 3).join(', ') + (added.length > 3 ? ` (+${added.length - 3} more)` : '')
+      out.push({
+        scope: 'session',
+        kind: 'dep',
+        severity: 'warn',
+        text: `${added.length} dependenc${added.length > 1 ? 'ies' : 'y'} added this session: ${names}`,
+        fix: `Review the dependencies added in this session (${names}): what each one is for, whether it is maintained, and whether we need it. Don't install or remove anything until I say so.`,
+      })
+    }
+  }
+
+  // Code changed with no test changed alongside it.
+  const sources = files.filter((f) => SOURCE.test(f) && !TEST.test(f))
+  if (sources.length && !files.some((f) => TEST.test(f))) {
+    out.push({
+      scope: 'session',
+      kind: 'tests',
+      severity: 'warn',
+      text: `${sources.length} source file${sources.length > 1 ? 's' : ''} changed this session, no test changed`,
+      fix: "Look at the code you changed in this session and tell me which tests are missing or should change. Don't write any until I say so.",
+    })
+  }
+
+  // Each changed file against the last commit, and the secrets it may hold.
+  const git = await exists($, `${w.top}/.git`)
+  let changed = 0
+  let added = 0
+  let removed = 0
+  const secrets = []
+  for (const file of files.slice(0, MAX_DIFF_FILES)) {
+    const now = await readText($, `${w.top}/${file}`)
+    if (now !== null) {
+      splitLines(now).forEach((text, i) => {
+        const hit = SECRETS.find(([, re]) => re.test(text))
+        if (hit) secrets.push({ file, line: i + 1, label: hit[0] })
+      })
+    }
+    if (!git) continue
+    const blob = await run($, [...GIT, 'cat-file', 'blob', `HEAD:${file}`], w.top, 8000)
+    if (failed(blob)) return blob
+    const before = blob.exitCode === 0 && !blob.isStdoutTruncated ? blob.stdout : null
+    if (before === null && now === null) continue
+    const a = before === null ? [] : splitLines(before)
+    const b = now === null ? [] : splitLines(now)
+    if (before !== null && now !== null && a.join('\n') === b.join('\n')) continue
+    const c = churn(a, b)
+    changed++
+    added += c.added
+    removed += c.removed
+  }
+  if (changed) {
+    out.push({
+      scope: 'session',
+      kind: 'uncommitted',
+      severity: 'warn',
+      text: `${changed} file${changed > 1 ? 's' : ''} changed this session, not committed (+${added} −${removed})`,
+      fix: "Show me what you changed in this session that is not committed yet, summarize it, and propose how to split it into commits. Don't commit anything until I say so.",
+    })
+  }
+
+  const anySecret = "Look for secrets in the files you changed in this session and tell me how to move them out of the code. Don't print any value, and don't commit or push anything until I say so."
+  for (const hit of secrets.slice(0, MAX_SECRET_ROWS)) {
+    out.push({
+      scope: 'session',
+      kind: 'secret',
+      severity: 'high',
+      text: `possible ${hit.label} in ${safe(hit.file, 60)}:${hit.line}`,
+      fix: PLAIN_PATH.test(hit.file)
+        ? `Look at ${hit.file}:${hit.line}: it may hold a ${hit.label}. Tell me whether it is a real secret and how to move it out of the code. Don't print the value, and don't commit or push anything until I say so.`
+        : anySecret,
+    })
+  }
+  const more = secrets.length - MAX_SECRET_ROWS
+  if (more > 0) {
+    out.push({
+      scope: 'session',
+      kind: 'secret',
+      severity: 'high',
+      text: `${more} more possible secret${more > 1 ? 's' : ''} in files changed this session`,
+      fix: anySecret,
+    })
+  }
+  return out
+}
+
 // The files changed this session inside this repo, relative to its top.
 function touchedIn(w) {
   const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '')
@@ -403,8 +570,8 @@ async function collect($, { npm = true } = {}) {
     await follow($)
     w = where
     if (!w.top) return
-    const sources = ['npm', 'git', 'debt']
-    const groups = await Promise.all([npm ? npmInsights($, w) : null, gitInsights($, w), debtInsights($, w)])
+    const sources = ['npm', 'git', 'debt', 'work']
+    const groups = await Promise.all([npm ? npmInsights($, w) : null, gitInsights($, w), debtInsights($, w), workInsights($, w)])
     if (w !== where) return
     // The npm lines there at the session's first scan are the project's;
     // one that shows up later (after an install, say) is the session's.
@@ -446,7 +613,7 @@ function isStale() {
 const DOT = { high: 'red', warn: 'yellow', info: 'gray' }
 // One glyph per kind of finding, one column wide, colored by severity.
 // A line saved by an older version has no kind and keeps the dot.
-const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✎', todo: '○', skip: '⊘' }
+const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✎', todo: '○', skip: '⊘', uncommitted: '±', dep: '⊕', tests: '∅', secret: '⚑' }
 const icon = (item) => ICON[item.kind] || '●'
 // The project's lines, grouped by the check that found them.
 const GROUPS = [
