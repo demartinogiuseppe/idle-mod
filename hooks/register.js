@@ -168,6 +168,9 @@ async function npmInsights($, w) {
   if (failed(audit)) return audit
   if (failed(outdated)) return outdated
 
+  // npm 8 writes the no-lockfile error to stderr and leaves stdout empty.
+  if (!audit.stdout.trim() && /\bENOLOCK\b/.test(audit.stderr || '')) return { failed: 'npm audit needs a package-lock.json' }
+
   const out = []
   try {
     const report = JSON.parse(audit.stdout)
@@ -613,8 +616,8 @@ function isStale() {
 const DOT = { high: 'red', warn: 'yellow', info: 'gray' }
 // One glyph per kind of finding, one column wide, colored by severity.
 // A line saved by an older version has no kind and keeps the dot.
-const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✎', todo: '○', skip: '⊘', uncommitted: '±', dep: '⊕', tests: '∅', secret: '⚑' }
-// U+FE0E asks for the glyph as text: a desktop would otherwise draw ✎ or ⚑ as
+const ICON = { vuln: '⚠', update: '⇡', unpushed: '↑', stash: '≡', branch: '⎇', fixme: '✱', todo: '○', skip: '⊘', uncommitted: '±', dep: '⊕', tests: '∅', secret: '⚑' }
+// U+FE0E asks for the glyph as text: a desktop would otherwise draw some glyphs as
 // a colored emoji, deaf to the severity color.
 const icon = (item) => (ICON[item.kind] || '●') + '︎'
 // The project's lines, grouped by the check that found them.

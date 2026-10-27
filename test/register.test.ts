@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 
 const PLUGIN = 'idle-mod'
 
-type Run = { exitCode: number; stdout: string }
+type Run = { exitCode: number; stdout: string; stderr?: string }
 type World = {
   root: string
   files: string[]
@@ -47,7 +47,7 @@ function world(on: On, w: World) {
     w.calls?.push({ argv: [...e.argv], cwd: e.init?.cwd && posix(e.init.cwd) })
     if (w.fail?.has(plain(e.argv))) throw new Error('timed out')
     const r = w.runs[plain(e.argv)] ?? { exitCode: 1, stdout: '' }
-    return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { stderr: '', ...r, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.surfaces', () => ({ value: w.surfaces ?? [] }))
@@ -429,6 +429,16 @@ test('npm audit without a lockfile says it needs one', async ($, on) => {
   expect(await texts(ui)).toContain('▲ npm checks didn\'t run: npm audit needs a package-lock.json')
 })
 
+test('npm 8 puts the no-lockfile error on stderr; it still says a lockfile is needed', async ($, on) => {
+  mock.store(on)
+  const runs = demoRuns('/demo')
+  runs['npm audit --json'] = { exitCode: 1, stdout: '', stderr: 'npm ERR! code ENOLOCK\n{ "error": { "code": "ENOLOCK" } }' }
+  world(on, { root: '/demo', files: demoFiles('/demo'), runs })
+  const ui = await scanned($)
+
+  expect(await texts(ui)).toContain('▲ npm checks didn\'t run: npm audit needs a package-lock.json')
+})
+
 test('opening the pane wakes a session that looked headless at start', async ($, on) => {
   mock.store(on)
   world(on, { root: '/demo', files: demoFiles('/demo'), runs: demoRuns('/demo') })
@@ -482,7 +492,7 @@ test('the pane marks each kind of finding, groups the project\'s, and says when 
   expect(shown).toContain('This session')
   for (const title of ['Dependencies', 'Git', 'Code']) expect(shown).toContain(title)
   // Each glyph is followed by U+FE0E, which asks for its text form.
-  for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✎', '○']) expect(shown).toContain(glyph + '︎')
+  for (const glyph of ['⚠', '⇡', '↑', '≡', '⎇', '✱', '○']) expect(shown).toContain(glyph + '︎')
   const fix = (await ui.findAll({ type: 'Button', text: 'Fix with Claude' })) as any[]
   expect(fix.length).toBeGreaterThan(0)
   expect(JSON.stringify(fix[0])).toContain('primary')
