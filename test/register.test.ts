@@ -8,7 +8,7 @@ type World = {
   root: string
   files: string[]
   runs: Record<string, Run>
-  calls?: { argv: string[]; cwd?: string }[]
+  calls?: { argv: string[]; cwd?: string; stdin?: string }[]
   // Commands that time out: $.process.run rejects for them.
   fail?: Set<string>
   // Where the session draws; none in a headless run.
@@ -51,9 +51,12 @@ function world(on: On, w: World) {
     return { value: text }
   })
   on('process.run', ($, e) => {
-    w.calls?.push({ argv: [...e.argv], cwd: e.init?.cwd && posix(e.init.cwd) })
-    if (w.fail?.has(plain(e.argv))) throw new Error('timed out')
-    const r = w.runs[plain(e.argv)] ?? { exitCode: 1, stdout: '' }
+    w.calls?.push({ argv: [...e.argv], cwd: e.init?.cwd && posix(e.init.cwd), stdin: e.init?.stdin })
+    // A key ending in `*` answers every command it starts.
+    const key = (map: Iterable<string>) => [...map].find((k) => k === plain(e.argv) || (k.endsWith('*') && plain(e.argv).startsWith(k.slice(0, -1))))
+    if (w.fail && key(w.fail)) throw new Error('timed out')
+    const found = key(Object.keys(w.runs))
+    const r = (found && w.runs[found]) || { exitCode: 1, stdout: '' }
     return { value: { stderr: '', ...r, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -1076,4 +1079,100 @@ test('a symbolic link the repo holds is never followed out of it', async ($, on)
   const ui = await mountPane($)
   await ui.press({ key: 'rescan' })
   expect((await texts(ui)).filter((t) => t.includes('creds'))).toEqual([])
+})
+
+// ------------------------------------------------------------- old commits
+const OLD = 'a'.repeat(40)
+const NEW = 'b'.repeat(40)
+const GONE = 'c'.repeat(40)
+const ALL_REFS = 'git rev-parse --all'
+const LOG = 'git log --all --stdin --no-textconv --no-ext-diff -p -U0 --format=%x00%H -G*'
+const BATCH = 'git cat-file --batch-check'
+// What git log -p -U0 prints for a commit that added lines to a new file.
+const added = (sha: string, file: string, from: number, ...lines: string[]) =>
+  `\0${sha}\n\ndiff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n@@ -0,0 +${from},${lines.length} @@\n` +
+  lines.map((l) => '+' + l + '\n').join('')
+
+function historyWorld(extra: Partial<World> = {}): World {
+  const runs = demoRuns('/demo')
+  runs[ALL_REFS] = { exitCode: 0, stdout: OLD + '\n' }
+  runs[HEAD] = { exitCode: 0, stdout: OLD + '\n' }
+  runs[LOG] = { exitCode: 0, stdout: added(OLD, 'src/old.js', 3, `const key = "${TOKEN}"`) }
+  return { root: '/demo', files: demoFiles('/demo'), runs, calls: [], ...extra }
+}
+const logs = (w: World) => (w.calls ?? []).filter((c) => plain(c.argv).startsWith(LOG.slice(0, -1)))
+
+test('a secret an old commit added shows with its commit, and the next search reads only new commits', async ($, on) => {
+  const kept = memStore(on)
+  const w = historyWorld()
+  world(on, w)
+
+  const ui = await scanned($)
+  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa')
+  expect(JSON.stringify(await texts(ui))).not.toContain(TOKEN)
+  expect((kept.get('history:/demo') as any).tips).toEqual([OLD])
+
+  // Nothing new since: git log does not run again.
+  await rescan(ui)
+  expect(logs(w)).toHaveLength(1)
+
+  // A new commit: the search starts past the tip it reached, and the old line stays.
+  w.runs[ALL_REFS] = { exitCode: 0, stdout: NEW + '\n' }
+  w.runs[BATCH] = { exitCode: 0, stdout: `${OLD} commit 230\n` }
+  w.runs[LOG] = { exitCode: 0, stdout: '' }
+  await rescan(ui)
+  expect(logs(w)).toHaveLength(2)
+  expect(logs(w)[1].stdin).toBe(`^${OLD}\n`)
+  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa')
+})
+
+test('a tip gone since, a rebased branch say, is left out of the next search', async ($, on) => {
+  memStore(on, { 'history:/demo': { at: Date.now(), tips: [OLD, GONE], hits: [], tooLong: false } })
+  const w = historyWorld()
+  w.runs[ALL_REFS] = { exitCode: 0, stdout: NEW + '\n' }
+  w.runs[BATCH] = { exitCode: 0, stdout: `${OLD} commit 230\n${GONE} missing\n` }
+  world(on, w)
+
+  await scanned($)
+  expect(logs(w)[0].stdin).toBe(`^${OLD}\n`)
+})
+
+test('the line an old commit added is counted from its hunk, and added text never passes for a file name', async ($, on) => {
+  memStore(on)
+  const w = historyWorld()
+  // An added line that reads `++ b/evil.js` prints as `+++ b/evil.js`.
+  w.runs[LOG] = { exitCode: 0, stdout: added(OLD, 'src/old.js', 3, '++ b/evil.js', `const key = "${TOKEN}"`) }
+  world(on, w)
+
+  const shown = await texts(await scanned($))
+  expect(shown).toContain('possible GitHub token in src/old.js:4, commit aaaaaaa')
+  expect(shown.filter((t) => t.includes('evil'))).toEqual([])
+})
+
+test('an old secret the person ignored stays hidden', async ($, on) => {
+  memStore(on, { 'ignored:/demo': ['history|src/old.js|GitHub token'] })
+  world(on, historyWorld())
+
+  expect((await texts(await scanned($))).filter((t) => t.includes('src/old.js'))).toEqual([])
+})
+
+test('a history that takes too long says so, and is not searched again for a week', async ($, on) => {
+  memStore(on)
+  const w = historyWorld({ fail: new Set([LOG]) })
+  world(on, w)
+
+  const ui = await scanned($)
+  expect(await texts(ui)).toContain('old commits not checked for secrets: the history took too long (gitleaks git can)')
+  await rescan(ui)
+  expect(logs(w)).toHaveLength(1)
+})
+
+test('where nothing draws, the history is not searched', async ($, on) => {
+  memStore(on)
+  const w = historyWorld()
+  world(on, w)
+  await $.session.start({ cwd: '/demo', isInteractive: false })
+
+  expect(await findings($)).not.toContain('src/old.js')
+  expect(logs(w)).toHaveLength(0)
 })

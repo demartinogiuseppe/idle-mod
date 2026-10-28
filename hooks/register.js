@@ -9,7 +9,7 @@ const KEEP_PROJECTS = 20
 
 // Severity sets the order in the pane; the band rotates through every line.
 const SEV = { high: 0, warn: 1, info: 2 }
-const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count', work: 'session checks' }
+const CHECKS = { npm: 'npm checks', git: 'git checks', debt: 'TODO/FIXME count', work: 'session checks', history: 'old commits check' }
 // What to do when a command the checks need cannot start.
 const HELP = {
   git: { install: 'Install Git, then restart Claude Code.', href: 'https://git-scm.com/downloads', label: 'git-scm.com/downloads' },
@@ -84,10 +84,10 @@ const PLAIN_PATH = /^[A-Za-z0-9._\/-]{1,200}$/
 
 // $.process.run rejects both when a command cannot start and when it runs out
 // of time; how long it took tells the two apart.
-async function run($, argv, cwd, timeoutMs) {
+async function run($, argv, cwd, timeoutMs, stdin) {
   const started = Date.now()
   try {
-    return await $.process.run(argv, { cwd, timeoutMs })
+    return await $.process.run(argv, stdin === undefined ? { cwd, timeoutMs } : { cwd, timeoutMs, stdin })
   } catch {
     const late = Date.now() - started >= timeoutMs - 1000
     if (late) return { failed: `${argv[0]} timed out` }
@@ -810,6 +810,139 @@ const placesOf = (hits) =>
     .map((hit) => (PLAIN_PATH.test(hit.file) ? `${hit.file}:${hit.line} (${hit.label})` : `a file changed this session (${hit.label})`))
     .join(', ') + (hits.length > 3 ? ` and ${hits.length - 3} more` : '')
 
+// ------------------------------------------------------------- old commits
+// A key that reached a commit before idle-mod was there still sits in the
+// history. git log -G finds the changes that match the secrets' patterns,
+// with the repo's diff drivers and text filters off, and prints only the
+// lines they added. Each search starts past the tips the last one reached,
+// kept in $.store, so after the first only new commits are read.
+const historyKey = (w) => 'history:' + w.top
+const SECRETS_ERE = SECRETS.map(([, re]) => `(${re.source})`).join('|')
+const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/
+const LABELS = new Set(SECRETS.map(([label]) => label))
+const MAX_TIPS = 300
+const MAX_HISTORY_HITS = 20
+const HISTORY_MS = 60000
+// A history that took too long is tried again after a week.
+const RETRY_MS = 7 * 24 * 60 * 60 * 1000
+
+// The secrets a `git log -p -U0` added, newest commit first, one per file and kind.
+function historyHits(patch) {
+  const hits = new Map()
+  let commit = ''
+  let file = null
+  let header = false
+  let line = 0
+  for (const l of patch.split('\n')) {
+    if (l.startsWith('\0')) {
+      commit = l.slice(1)
+      file = null
+    } else if (l.startsWith('diff --git ')) {
+      file = null
+      header = true
+    } else if (header && l.startsWith('+++ ')) {
+      // A quoted name keeps git's escapes: it is shown, never sent.
+      const name = l.slice(4)
+      file = name === '/dev/null' ? null : name.replace(/^"?b\//, '').replace(/"$/, '')
+      header = false
+    } else if (!header && file !== null && SHA.test(commit)) {
+      const at = /^@@ -\d+(,\d+)? \+(\d+)/.exec(l)
+      if (at) line = Number(at[2])
+      else if (l.startsWith('+')) {
+        const hit = SECRETS.find(([, re]) => re.test(l))
+        const id = hit && `history|${file}|${hit[0]}`
+        if (hit && !hits.has(id)) hits.set(id, { id, commit, file, line, label: hit[0] })
+        line++
+      }
+    }
+  }
+  return [...hits.values()]
+}
+
+async function historyInsights($, w) {
+  if (!(await exists($, `${w.top}/.git`))) return []
+  let saved = null
+  try {
+    saved = await $.store.get(historyKey(w))
+  } catch {
+    // never searched
+  }
+  const valid = (h) => h && typeof h.id === 'string' && SHA.test(h.commit) && LABELS.has(h.label) && typeof h.file === 'string' && Number.isInteger(h.line)
+  let hits = saved && Array.isArray(saved.hits) ? saved.hits.filter(valid) : []
+  let tips = saved && Array.isArray(saved.tips) ? saved.tips.filter((t) => typeof t === 'string' && SHA.test(t)) : []
+  let tooLong = Boolean(saved && saved.tooLong && Date.now() - (Number(saved.at) || 0) < RETRY_MS)
+
+  if (!tooLong) {
+    const refs = await run($, [...GIT, 'rev-parse', '--all'], w.top, 8000)
+    if (failed(refs)) return refs
+    const head = await headOf($, w)
+    const now = [...new Set([head, ...(refs.exitCode === 0 ? refs.stdout.split('\n') : [])].map((s) => s.trim()))].filter((s) => SHA.test(s))
+    if (now.some((t) => !tips.includes(t))) {
+      // A tip gone since (a rebased branch, say) would stop git: those stay out.
+      if (tips.length) {
+        const check = await run($, [...GIT, 'cat-file', '--batch-check'], w.top, 8000, tips.join('\n') + '\n')
+        if (failed(check)) return check
+        const there = new Set(check.stdout.split('\n').filter((l) => / (commit|tag)\b/.test(l)).map((l) => l.split(' ')[0]))
+        tips = tips.filter((t) => there.has(t))
+      }
+      const log = await run(
+        $,
+        [...GIT, 'log', '--all', '--stdin', '--no-textconv', '--no-ext-diff', '-p', '-U0', '--format=%x00%H', '-G' + SECRETS_ERE],
+        w.top,
+        HISTORY_MS,
+        tips.map((t) => `^${t}\n`).join(''),
+      )
+      // git started for rev-parse, so a log that fails ran out of time.
+      if (failed(log)) {
+        tooLong = true
+        hits = []
+        tips = []
+      } else if (log.exitCode === 0) {
+        const found = historyHits(log.stdout)
+        hits = [...found, ...hits.filter((h) => !found.some((f) => f.id === h.id))].slice(0, MAX_HISTORY_HITS)
+        // A cut report may have left commits out: the next search reads them again.
+        if (!log.isStdoutTruncated) tips = now.slice(0, MAX_TIPS)
+      }
+      try {
+        await $.store.set(historyKey(w), { at: Date.now(), tips, hits, tooLong })
+      } catch {
+        // searched again next time
+      }
+    }
+  }
+
+  if (tooLong) {
+    return [{ kind: 'skip', severity: 'info', text: 'old commits not checked for secrets: the history took too long (gitleaks git can)' }]
+  }
+  const out = []
+  const live = hits.filter((h) => !ignored.has(h.id))
+  for (const hit of live.slice(0, MAX_SECRET_ROWS)) {
+    const short = hit.commit.slice(0, 7)
+    const plainPath = PLAIN_PATH.test(hit.file)
+    out.push({
+      kind: 'secret',
+      severity: 'high',
+      id: hit.id,
+      text: `possible ${hit.label} in ${safe(hit.file, 60)}:${hit.line}, commit ${short}`,
+      brief: plainPath ? `possible ${hit.label} in ${hit.file}:${hit.line}, commit ${short}` : `possible ${hit.label} in a file of commit ${short}`,
+      fix:
+        `Commit ${short} in this repo's history added what may be a ${hit.label}` +
+        (plainPath ? ` at ${hit.file}:${hit.line}` : '') +
+        ". Tell me whether it is a real secret and whether that commit was pushed. A real one has to be revoked and replaced first; taking it out of the history means rewriting it, so explain the steps and don't run any of them until I say so. Don't print the value.",
+    })
+  }
+  const more = live.length - MAX_SECRET_ROWS
+  if (more > 0) {
+    out.push({
+      kind: 'secret',
+      severity: 'high',
+      text: `${more} more possible secret${more > 1 ? 's' : ''} in old commits`,
+      fix: "Look for secrets in this repo's git history and tell me, for each, whether it is real and whether its commit was pushed. Don't print any value, and don't rewrite history until I say so.",
+    })
+  }
+  return out
+}
+
 // Files changed this session by anything but Claude's edit tools: a shell
 // command, a script, a generator, an editor. git lists the tracked and the
 // untracked files (ls-files reads the index and walks the folders, and runs
@@ -897,8 +1030,16 @@ async function scan($, { npm = true, force = false } = {}) {
     w = where
     if (!w.top) return
     await findChanged($, w)
-    const sources = ['npm', 'git', 'debt', 'work']
-    const groups = await Promise.all([npm ? npmInsights($, w) : null, gitInsights($, w), debtInsights($, w), workInsights($, w)])
+    const sources = ['npm', 'git', 'debt', 'work', 'history']
+    // The history is searched only where someone reads the pane: the first
+    // search of a long one takes a while.
+    const groups = await Promise.all([
+      npm ? npmInsights($, w) : null,
+      gitInsights($, w),
+      debtInsights($, w),
+      workInsights($, w),
+      interactive ? historyInsights($, w) : null,
+    ])
     if (w !== where) return
     // The npm lines there at the session's first scan are the project's;
     // one that shows up later (after an install, say) is the session's.
