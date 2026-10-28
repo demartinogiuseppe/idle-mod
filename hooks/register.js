@@ -923,8 +923,8 @@ async function historyInsights($, w) {
       kind: 'secret',
       severity: 'high',
       id: hit.id,
-      text: `possible ${hit.label} in ${safe(hit.file, 60)}:${hit.line}, commit ${short}`,
-      brief: plainPath ? `possible ${hit.label} in ${hit.file}:${hit.line}, commit ${short}` : `possible ${hit.label} in a file of commit ${short}`,
+      text: `possible ${hit.label} in ${safe(hit.file, 60)}:${hit.line}, commit ${short}; rotate it if pushed`,
+      brief: plainPath ? `possible ${hit.label} in ${hit.file}:${hit.line}, commit ${short}; rotate it if pushed` : `possible ${hit.label} in a file of commit ${short}; rotate it if pushed`,
       fix:
         `Commit ${short} in this repo's history added what may be a ${hit.label}` +
         (plainPath ? ` at ${hit.file}:${hit.line}` : '') +
@@ -936,7 +936,7 @@ async function historyInsights($, w) {
     out.push({
       kind: 'secret',
       severity: 'high',
-      text: `${more} more possible secret${more > 1 ? 's' : ''} in old commits`,
+      text: `${more} more possible secret${more > 1 ? 's' : ''} in old commits; rotate any that were pushed`,
       fix: "Look for secrets in this repo's git history and tell me, for each, whether it is real and whether its commit was pushed. Don't print any value, and don't rewrite history until I say so.",
     })
   }

@@ -1108,7 +1108,7 @@ test('a secret an old commit added shows with its commit, and the next search re
   world(on, w)
 
   const ui = await scanned($)
-  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa')
+  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa; rotate it if pushed')
   expect(JSON.stringify(await texts(ui))).not.toContain(TOKEN)
   expect((kept.get('history:/demo') as any).tips).toEqual([OLD])
 
@@ -1123,7 +1123,7 @@ test('a secret an old commit added shows with its commit, and the next search re
   await rescan(ui)
   expect(logs(w)).toHaveLength(2)
   expect(logs(w)[1].stdin).toBe(`^${OLD}\n`)
-  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa')
+  expect(await texts(ui)).toContain('possible GitHub token in src/old.js:3, commit aaaaaaa; rotate it if pushed')
 })
 
 test('a tip gone since, a rebased branch say, is left out of the next search', async ($, on) => {
@@ -1145,7 +1145,7 @@ test('the line an old commit added is counted from its hunk, and added text neve
   world(on, w)
 
   const shown = await texts(await scanned($))
-  expect(shown).toContain('possible GitHub token in src/old.js:4, commit aaaaaaa')
+  expect(shown).toContain('possible GitHub token in src/old.js:4, commit aaaaaaa; rotate it if pushed')
   expect(shown.filter((t) => t.includes('evil'))).toEqual([])
 })
 
