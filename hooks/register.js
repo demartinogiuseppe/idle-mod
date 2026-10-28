@@ -783,16 +783,78 @@ const isCommit = (command) =>
     return at >= 0 && /\scommit\b/.test(part.slice(at))
   })
 
-// The files changed this session inside this repo, relative to its top.
+// The files of the commit HEAD names that may hold a secret, read from git's
+// objects: the tree's file names by diff-tree, their text by cat-file, so no
+// filter of the repo runs.
+async function secretsCommitted($, w) {
+  const names = await run($, [...GIT, 'diff-tree', '--no-ext-diff', '--no-textconv', '--root', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD'], w.top, 8000)
+  if (failed(names) || names.exitCode !== 0) return []
+  const hits = []
+  for (const file of names.stdout.split('\0').filter(Boolean).slice(0, MAX_DIFF_FILES)) {
+    const blob = await run($, [...GIT, 'cat-file', 'blob', `HEAD:${file}`], w.top, 8000)
+    if (failed(blob) || blob.exitCode !== 0 || blob.isStdoutTruncated || blob.stdout.length > MAX_READ || blob.stdout.includes('\0')) continue
+    hits.push(...secretsIn(blob.stdout, file).filter((hit) => !ignored.has(hit.id)))
+  }
+  return hits
+}
+
+const headOf = async ($, w) => {
+  const r = await run($, [...GIT, 'rev-parse', '--verify', '-q', 'HEAD'], w.top, 5000)
+  return !failed(r) && r.exitCode === 0 ? r.stdout.trim() : ''
+}
+
+// Where the secrets are, for a text the model reads: an odd file name stays out.
+const placesOf = (hits) =>
+  hits
+    .slice(0, 3)
+    .map((hit) => (PLAIN_PATH.test(hit.file) ? `${hit.file}:${hit.line} (${hit.label})` : `a file changed this session (${hit.label})`))
+    .join(', ') + (hits.length > 3 ? ` and ${hits.length - 3} more` : '')
+
+// Files changed this session by anything but Claude's edit tools: a shell
+// command, a script, a generator, an editor. git lists the tracked and the
+// untracked files (ls-files reads the index and walks the folders, and runs
+// none of the repo's filters), and a file counts once it was modified after
+// the session began.
+const MAX_STAT_FILES = 3000
+async function findChanged($, w) {
+  if (!w.top || !(await exists($, `${w.top}/.git`))) return
+  const [tracked, untracked] = await Promise.all([
+    run($, [...GIT, 'ls-files', '-z'], w.top, 8000),
+    run($, [...GIT, 'ls-files', '-z', '-o', '--exclude-standard'], w.top, 8000),
+  ])
+  const names = [tracked, untracked].flatMap((r) =>
+    !failed(r) && r.exitCode === 0 && !r.isStdoutTruncated ? r.stdout.split('\0').filter(Boolean) : [],
+  )
+  const since = session.since * 1000
+  const known = new Set(touchedIn(w))
+  const fresh = names.filter((name) => !known.has(name)).slice(0, MAX_STAT_FILES)
+  // A few at a time: each stat is a call through the host.
+  for (let i = 0; i < fresh.length; i += 50) {
+    await Promise.all(
+      fresh.slice(i, i + 50).map(async (name) => {
+        try {
+          const st = await $.fs.stat(`${w.top}/${name}`)
+          // A link may lead out of the repo, to a file that is not the project's.
+          if (st && st.kind === 'file' && !st.isLink && st.mtimeMs >= since) session.touched.add(`${w.top}/${name}`)
+        } catch {
+          // gone, or not readable: not this session's to report
+        }
+      }),
+    )
+  }
+}
+
+// The files changed this session inside this repo, relative to its top,
+// each once however its path was spelled.
 function touchedIn(w) {
   const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '')
   const top = norm(w.top) + '/'
-  const out = []
+  const out = new Set()
   for (const path of session.touched) {
     const f = norm(path)
-    if (f.toLowerCase().startsWith(top.toLowerCase()) && f.length > top.length) out.push(f.slice(top.length))
+    if (f.toLowerCase().startsWith(top.toLowerCase()) && f.length > top.length) out.add(f.slice(top.length))
   }
-  return out.slice(0, 200)
+  return [...out].slice(0, 200)
 }
 
 // Keep the last few projects only; the store is one file shared by all of them.
@@ -834,6 +896,7 @@ async function scan($, { npm = true, force = false } = {}) {
     await follow($)
     w = where
     if (!w.top) return
+    await findChanged($, w)
     const sources = ['npm', 'git', 'debt', 'work']
     const groups = await Promise.all([npm ? npmInsights($, w) : null, gitInsights($, w), debtInsights($, w), workInsights($, w)])
     if (w !== where) return
@@ -1052,46 +1115,61 @@ export function register(on, options) {
     return { result: report() }
   })
 
-  // Claude's commits wait while a file it changed this session may hold a
-  // secret, subagents' included. The reason names the file, line and kind,
-  // never the value; an ignored secret lets the commit through. Where nothing
+  // Claude's commits wait while a file changed this session may hold a
+  // secret, subagents' included, through Bash or PowerShell. The reason names
+  // the file, line and kind, never the value; an ignored secret lets the
+  // commit through. A command that writes a file and commits it at once gets
+  // past the wait, so the commit it made is read afterwards. Where nothing
   // draws, only with the headless option: there is no pane to ignore from.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (!active() || !isCommit(String(e.command || ''))) return next(e)
-    if (!where.top) await follow($)
-    const hits = await secretsNow($)
-    if (!hits.length) return next(e)
-    const places = hits
-      .slice(0, 3)
-      // The reason reaches the model: an odd file name stays out of it.
-      .map((hit) => (PLAIN_PATH.test(hit.file) ? `${hit.file}:${hit.line} (${hit.label})` : `a file changed this session (${hit.label})`))
-      .join(', ')
-    const rest = hits.length > 3 ? ` and ${hits.length - 3} more` : ''
-    return {
-      deny:
-        `idle-mod stopped this commit: ${places}${rest} may hold a secret. ` +
-        "Don't print the value. Tell the person which line it is and propose how to move it out of the code. " +
-        (interactive
-          ? "If it is not a real secret, they can press Ignore on its line in the idle-mod pane; then commit again. "
-          : 'If it is not a real secret, they can press Ignore on its line in the idle-mod pane of an interactive session on this project, then run this again. ') +
-        "Don't try to commit another way.",
-    }
-  }).catch(passOn)
+  const ignoreHint = () =>
+    interactive
+      ? 'If it is not a real secret, they can press Ignore on its line in the idle-mod pane. '
+      : 'If it is not a real secret, they can press Ignore on its line in the idle-mod pane of an interactive session on this project. '
+  for (const tool of ['Bash', 'PowerShell']) {
+    on('tool.call', { tool }, async ($, e, next) => {
+      if (!active() || !isCommit(String(e.command || ''))) return next(e)
+      if (!where.top) await follow($)
+      const w = where
+      await findChanged($, w)
+      const hits = await secretsNow($)
+      if (hits.length) {
+        return {
+          deny:
+            `idle-mod stopped this commit: ${placesOf(hits)} may hold a secret. ` +
+            "Don't print the value. Tell the person which line it is and propose how to move it out of the code. " +
+            ignoreHint() +
+            "Then commit again. Don't try to commit another way.",
+        }
+      }
+      const before = w.top ? await headOf($, w) : ''
+      const result = await next(e)
+      if (!w.top || result.deny || result.isError) return result
+      const after = await headOf($, w)
+      if (!after || after === before) return result
+      const made = await secretsCommitted($, w)
+      if (!made.length) return result
+      return {
+        deny:
+          `The commit was made, and idle-mod found that it may hold a secret: ${placesOf(made)}. ` +
+          "Don't print the value and don't push. Tell the person, and propose how to take it out of the commit (for one not pushed yet, git reset --soft HEAD~1 keeps the changes); don't do it until they say so. " +
+          ignoreHint(),
+      }
+    }).catch(passOn)
 
-  // Commands that change commits or installed packages call for a rescan.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const result = await next(e)
-    try {
-      const command = String(e.command || '')
-      if (/\bgit\s+(commit|merge|rebase|cherry-pick|revert|am|pull|reset|push)\b/.test(command)) session.dirty.git = true
-      if (/\b(npm|pnpm|yarn)\s+(i|install|add|ci|update|up|upgrade|remove|rm|uninstall)\b/.test(command)) session.dirty.npm = true
-      // These write the manifests the session checks read.
-      if (/\b(uv|poetry|cargo)\s+(add|remove|rm)\b/.test(command)) session.dirty.git = true
-    } catch {
-      // bookkeeping only
-    }
-    return result
-  }).catch(passOn)
+    // Commands that change files, commits or installed packages call for a rescan.
+    on('tool.call', { tool }, async ($, e, next) => {
+      const result = await next(e)
+      try {
+        const command = String(e.command || '')
+        // Any command may have written files: the next scan looks for them.
+        session.dirty.git = true
+        if (/\b(npm|pnpm|yarn)\s+(i|install|add|ci|update|up|upgrade|remove|rm|uninstall)\b/.test(command)) session.dirty.npm = true
+      } catch {
+        // bookkeeping only
+      }
+      return result
+    }).catch(passOn)
+  }
 
   on('command.run', { command: 'idle-mod' }, async ($) => {
     // Someone ran the command, so something draws.

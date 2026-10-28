@@ -15,6 +15,12 @@ type World = {
   surfaces?: string[]
   // What $.fs.read finds on disk, by path; a path not here cannot be read.
   contents?: Record<string, string>
+  // When each file on disk was last written (ms); a path not here has no stat.
+  mtimes?: Record<string, number>
+  // Runs after a tool call the world answers, as the tool would act on disk.
+  onTool?: (e: any) => void
+  // Paths that are symbolic links.
+  links?: string[]
 }
 
 // The engine hands paths over resolved for the host (G:\demo\.git on Windows).
@@ -56,7 +62,15 @@ function world(on: On, w: World) {
   on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('tool.call', () => ({ result: {}, text: '' }))
+  on('tool.call', ($, e) => {
+    w.onTool?.(e)
+    return { result: {}, text: '' }
+  })
+  on('fs.stat', ($, e) => {
+    const at = w.mtimes?.[posix(e.path)]
+    if (at === undefined) throw new Error('ENOENT')
+    return { value: { kind: 'file', size: 1, mtimeMs: at, isLink: Boolean(w.links?.includes(posix(e.path))) } }
+  })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return Text({ children: ['engine'] })
@@ -973,4 +987,93 @@ test('past ten other sessions, the oldest shares are deleted, so the store never
   // The newest stay.
   expect(peers).toContain('session:%2Fdemo|s0')
   expect(peers).not.toContain('session:%2Fdemo|s14')
+})
+
+// A session where a shell command, not Claude's edit tools, wrote src/config.js.
+const LS = 'git ls-files -z'
+const LS_NEW = 'git ls-files -z -o --exclude-standard'
+const HEAD = 'git rev-parse --verify -q HEAD'
+function shellWorld(extra: Partial<World> = {}): World {
+  const runs = demoRuns('/demo')
+  runs[LS] = { exitCode: 0, stdout: 'README.md\0' }
+  runs[LS_NEW] = { exitCode: 0, stdout: 'src/config.js\0' }
+  runs[HEAD] = { exitCode: 0, stdout: 'aaa\n' }
+  return {
+    root: '/demo',
+    files: demoFiles('/demo'),
+    runs,
+    contents: { '/demo/src/config.js': `const token = "${TOKEN}"\n`, '/demo/README.md': 'hi\n' },
+    // README is older than the session; the config file was written during it.
+    mtimes: { '/demo/README.md': Date.now() - 86400000, '/demo/src/config.js': Date.now() + 1000 },
+    ...extra,
+  }
+}
+
+for (const tool of ['Bash', 'PowerShell'] as const) {
+  test(`a file a shell command wrote is the session's, and its secret stops a ${tool} commit`, async ($, on) => {
+    mock.store(on)
+    world(on, shellWorld())
+    await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+    const stopped = (await $.tool.call({ tool, command: 'git add -A; git commit -m "config"' } as any)) as any
+    expect(stopped.deny).toContain('src/config.js:1 (GitHub token)')
+
+    const ui = await mountPane($)
+    await ui.press({ key: 'rescan' })
+    const shown = await texts(ui)
+    expect(shown).toContain('possible GitHub token in src/config.js:1')
+    // The file older than the session is not the session's.
+    expect(shown.filter((t) => t.includes('README'))).toEqual([])
+    expect(shown).toContain('1 file changed this session, not committed (+1 −0)')
+  })
+}
+
+test('a commit that writes the secret in the same command is read afterwards', async ($, on) => {
+  mock.store(on)
+  const w = shellWorld({ contents: {}, mtimes: {} })
+  w.runs[LS_NEW] = { exitCode: 0, stdout: '' }
+  // The command writes the file and commits it: HEAD moves, the tree holds it.
+  w.onTool = (e) => {
+    if (e.tool !== 'Bash') return
+    w.runs[HEAD] = { exitCode: 0, stdout: 'bbb\n' }
+    w.runs['git diff-tree --no-ext-diff --no-textconv --root --no-commit-id --name-only -r -z HEAD'] = { exitCode: 0, stdout: 'src/config.js\0' }
+    w.runs['git cat-file blob HEAD:src/config.js'] = { exitCode: 0, stdout: `const token = "${TOKEN}"\n` }
+  }
+  world(on, w)
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  const told = (await $.tool.call({ tool: 'Bash', command: `printf x > src/config.js && git add -A && git commit -m c` })) as any
+  expect(told.deny).toContain('The commit was made')
+  expect(told.deny).toContain('src/config.js:1 (GitHub token)')
+  expect(told.deny).toContain("don't push")
+  expect(told.deny).not.toContain(TOKEN)
+})
+
+test('a commit that made nothing new says nothing, whatever an older commit holds', async ($, on) => {
+  mock.store(on)
+  const w = shellWorld({ contents: {}, mtimes: {} })
+  w.runs[LS_NEW] = { exitCode: 0, stdout: '' }
+  w.runs['git diff-tree --no-ext-diff --no-textconv --root --no-commit-id --name-only -r -z HEAD'] = { exitCode: 0, stdout: 'src/config.js\0' }
+  w.runs['git cat-file blob HEAD:src/config.js'] = { exitCode: 0, stdout: `const token = "${TOKEN}"\n` }
+  world(on, w)
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+  // Nothing to commit: HEAD stays where it was.
+  expect(((await commit($)) as any).deny).toBeUndefined()
+})
+
+test('a symbolic link the repo holds is never followed out of it', async ($, on) => {
+  mock.store(on)
+  const w = shellWorld()
+  // A link to a credentials file elsewhere, written recently.
+  w.runs[LS_NEW] = { exitCode: 0, stdout: 'creds\0' }
+  w.contents = { '/demo/creds': 'aws_access_key_id = AKIA0123456789ABCDEF\n' }
+  w.mtimes = { '/demo/creds': Date.now() + 1000 }
+  w.links = ['/demo/creds']
+  world(on, w)
+  await $.session.start({ cwd: '/demo', surface: 'terminal', isInteractive: true })
+
+  expect(((await commit($)) as any).deny).toBeUndefined()
+  const ui = await mountPane($)
+  await ui.press({ key: 'rescan' })
+  expect((await texts(ui)).filter((t) => t.includes('creds'))).toEqual([])
 })
