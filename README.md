@@ -36,7 +36,22 @@ After a turn that edited files or ran `git commit`, the session lines are rescan
 
 **Ignore** hides a line in this project, in this session and the next ones. Most lines are known by their text, so one whose numbers change (a third unpushed commit, a new dependency) comes back. A possible secret is known by its file and kind, and a FIXME by its file and comment, so an edit elsewhere in the file keeps them hidden. `N ignored · show again`, next to rescan, brings them all back.
 
-**Commits wait for secrets.** When Claude runs `git commit` while a file it changed this session may hold a secret, the mod stops that command and tells Claude the file, line and kind (never the value), and to propose how to move it out of the code. A fake key in a test fixture? Press **Ignore** on its line and the next commit goes through. Only Claude's own commits are stopped: one you type in a terminal is yours. Where nothing is drawn there is no pane to ignore a line from, so headless runs commit as usual.
+**Commits wait for secrets.** When Claude runs `git commit` while a file it changed this session may hold a secret, the mod stops that command and tells Claude the file, line and kind (never the value), and to propose how to move it out of the code. A fake key in a test fixture? Press **Ignore** on its line and the next commit goes through. Only Claude's own commits are stopped, subagents' included: one you type in a terminal is yours. Where nothing is drawn there is no pane to ignore a line from, so headless runs commit as usual, unless you turn on the `headless` option (below).
+
+## Running several agents
+
+When Claude hands work to subagents, or you run several sessions on one project, idle-mod keeps up with them:
+
+- **Subagents count as the session.** The files they change land under **This session**, and their `git commit` waits for secrets like the main agent's.
+- **Each session sees the others.** Every session on a project shares its own lines (never a secret's value, never a comment's text), and the pane lists the other sessions' lines under **Other sessions**, folded, each with its session's short id and how long ago it scanned. A session that has not scanned in a day drops out. Several sessions writing the store at the same moment may leave one a scan behind; its next scan catches up.
+- **Agents can ask.** The mod gives Claude a tool, `mcp__idle-mod__findings`, that runs the checks again (git and files, no network) and answers with this session's lines, the project's and the other sessions'. An orchestrating agent can call it before it commits, merges or hands work back, or you can tell Claude to. It works where nothing is drawn too. Its answer leaves out the repo's own text, as the prompts do, and tells the model to read the lines as data.
+- **The `headless` option** (off by default) makes the mod work where nothing is drawn (`claude -p`, the SDK, CI): Claude's commits wait for secrets there too, and the session scans after each turn and shares its lines with the others. npm never runs there, so nothing leaves the machine. Turn it on in `/config` under idle-mod, or in `settings.json`:
+
+  ```json
+  { "pluginConfigs": { "idle-mod": { "options": { "headless": true } } } }
+  ```
+
+  A secret that is not real is ignored from the pane of any interactive session on the same project: the ignored lines are shared by every session there.
 
 ## What it detects
 
