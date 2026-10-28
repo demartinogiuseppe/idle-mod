@@ -1,10 +1,18 @@
 {
   "name": "idle-mod",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Turns Claude Code's wait state into a live briefing on your own project: vulnerabilities, unpushed commits, stale branches, TODO/FIXME debt. Local only, zero tokens, and the fix is one button away.",
   "author": {
     "name": "Giuseppe De Martino"
   },
   "license": "MIT",
+  "userConfig": {
+    "headless": {
+      "type": "boolean",
+      "title": "Run where nothing is drawn",
+      "description": "In claude -p, SDK and CI sessions, stop Claude's commits that may hold a secret and share the session's findings with the other sessions on the project. Git and files only, no network.",
+      "default": false
+    }
+  },
   "keywords": ["mod", "statusline", "security", "dependencies", "wait-state", "productivity"]
 }

@@ -85,11 +85,11 @@ When Git or npm is missing, the pane says which check did not run and links to w
 
 ## What it sends, and where it runs
 
-No telemetry, no server of ours, no account. The briefings never call the model, so they cost zero tokens; only pressing **Fix with Claude** sends a prompt, the same as typing it yourself.
+No telemetry, no server of ours, no account. The briefings never call the model, so they cost zero tokens; only pressing **Fix with Claude** sends a prompt, the same as typing it yourself. The findings tool's name sits in Claude's tool list like any tool's, a few tokens, and its answer is read by the model only when Claude calls it.
 
 What does leave your machine: in a project with a `package.json`, the mod runs `npm audit` and `npm outdated` when a session starts, and again when you start a turn or open the pane and the last scan is more than 30 minutes old. Like running those commands yourself, they send your dependency names and versions to the npm registry in your npm configuration. Everything else (git and the TODO/FIXME count) stays local.
 
-The last scan of each of your 20 most recent projects is saved on your machine, under Claude Code's configuration folder, so the next session can show it right away. It holds the project's path and the finding lines, nothing else. The lines you ignore are saved there too, per project: the line's text, or a secret's file and kind.
+The last scan of each of your 20 most recent projects is saved on your machine, under Claude Code's configuration folder, so the next session can show it right away. It holds the project's path and the finding lines, nothing else. The lines you ignore are saved there too, per project: the line's text, or a secret's file and kind. So is each session's share for the others: its lines, without the repo's own text, for a day.
 
 **Opening a repo you don't trust.**
 
@@ -105,7 +105,7 @@ claude plugin validate ./idle-mod
 
 The `hooks:` and `calls:` lines tell you every event it handles and everything it asks Claude Code to do.
 
-The band and the pane are drawn in the terminal and in the Desktop app's Code tab. Where nothing is drawn (`claude -p`, CI, an SDK script with no app attached) the mod runs no checks at all.
+The band and the pane are drawn in the terminal and in the Desktop app's Code tab. Where nothing is drawn (`claude -p`, CI, an SDK script with no app attached) the mod runs no checks of its own, unless the `headless` option is on or Claude calls the findings tool.
 
 ## Test before you trust
 
