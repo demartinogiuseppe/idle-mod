@@ -155,10 +155,14 @@ const isIgnored = (item) => ignored.has(idOf(item))
 const brief = (item) => item.brief || item.text
 
 // Each session shares its lines under its own key, so sessions never write
-// the same one. A session that has not scanned in a day is dropped.
-const peerPrefix = (w) => `session:${w.top}|`
+// the same one. A session that has not scanned in a day is dropped, and past
+// MAX_PEERS the oldest go too: the store is one file of 4 MiB for every
+// project, and an orchestrator may start hundreds of sessions in a day. The
+// path is encoded so that one project's prefix never starts another's.
+const peerPrefix = (w) => `session:${encodeURIComponent(w.top)}|`
 const PEER_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const MAX_PEERS = 10
+const MAX_PEER_LINES = 30
 
 // Share this session's lines, then read the others'. Where the store is
 // written by several processes at once a share may lag; the next scan of
@@ -179,11 +183,14 @@ async function share($, w) {
       continue
     }
     const lines = peer.lines
-      .filter((l) => l && SEV[l.severity] !== undefined && typeof l.text === 'string')
+      .filter((l) => l && Object.hasOwn(SEV, l.severity) && typeof l.text === 'string')
+      .slice(0, MAX_PEER_LINES)
       .map((l) => ({ kind: Object.hasOwn(ICON, l.kind) ? l.kind : 'other', severity: l.severity, text: safe(l.text, 120) }))
-    found.push({ id: safe(key.slice(prefix.length), 8), at, lines })
+    found.push({ key, id: safe(key.slice(prefix.length), 8), at, lines })
   }
-  others = found.sort((a, b) => b.at - a.at).slice(0, MAX_PEERS)
+  found.sort((a, b) => b.at - a.at)
+  for (const old of found.slice(MAX_PEERS)) await $.store.delete(old.key)
+  others = found.slice(0, MAX_PEERS)
 }
 
 // Point the mod at the session's project. After /cd or a worktree move the

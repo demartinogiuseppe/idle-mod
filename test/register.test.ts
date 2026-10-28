@@ -933,19 +933,21 @@ test('with the headless option, a commit that may hold a secret waits where noth
 
 test('the other sessions on a project share their lines; old or forged ones are dropped', async ($, on) => {
   const kept = memStore(on, {
-    'session:/demo|peer1234': { at: Date.now() - 5 * 60000, lines: [{ kind: 'secret', severity: 'high', text: 'possible AWS access key in infra/env.js:4' }] },
-    'session:/demo|stale': { at: Date.now() - 2 * 86400000, lines: [{ kind: 'todo', severity: 'info', text: 'old news' }] },
-    'session:/other|x': { at: Date.now(), lines: [{ kind: 'todo', severity: 'info', text: 'another project' }] },
-    'session:/demo|forged': { at: Date.now(), lines: [{ kind: '__proto__', severity: 'high', text: 'line\x1b[31m red' }, { kind: 'x', severity: 'nope', text: 'bad severity' }] },
+    'session:%2Fdemo|peer1234': { at: Date.now() - 5 * 60000, lines: [{ kind: 'secret', severity: 'high', text: 'possible AWS access key in infra/env.js:4' }] },
+    'session:%2Fdemo|stale': { at: Date.now() - 2 * 86400000, lines: [{ kind: 'todo', severity: 'info', text: 'old news' }] },
+    'session:%2Fother|x': { at: Date.now(), lines: [{ kind: 'todo', severity: 'info', text: 'another project' }] },
+    'session:%2Fdemo|forged': { at: Date.now(), lines: [{ kind: '__proto__', severity: 'high', text: 'line\x1b[31m red' }, { kind: 'x', severity: 'nope', text: 'bad severity' }, { kind: 'x', severity: 'toString', text: 'prototype severity' }] },
+    // Another project whose path starts with this one's, a | after it.
+    'session:%2Fdemo%7Cx|p': { at: Date.now(), lines: [{ kind: 'todo', severity: 'info', text: 'lookalike project' }] },
   })
   const { ui } = await edited($, on, { contents: { '/demo/src/app.js': `const key = "${TOKEN}"\n` } }, false)
 
   // This session's lines are shared under its own key, without the value.
-  const mineShared = JSON.stringify(kept.get('session:/demo|me'))
+  const mineShared = JSON.stringify(kept.get('session:%2Fdemo|me'))
   expect(mineShared).toContain('possible GitHub token in src/app.js:1')
   expect(mineShared).not.toContain(TOKEN)
-  expect(kept.has('session:/demo|stale')).toBe(false)
-  expect(kept.has('session:/other|x')).toBe(true)
+  expect(kept.has('session:%2Fdemo|stale')).toBe(false)
+  expect(kept.has('session:%2Fother|x')).toBe(true)
 
   expect(JSON.stringify(await ui.find({ key: 'others' }))).toContain('▸ Other sessions · 2')
   await ui.press({ key: 'others' })
@@ -953,10 +955,22 @@ test('the other sessions on a project share their lines; old or forged ones are 
   expect(shown).toContain('possible AWS access key in infra/env.js:4')
   expect(shown).toContain('line?[31m red')
   expect(shown).toContain('session peer1234 · 5m ago')
-  for (const gone of ['old news', 'another project', 'bad severity']) expect(shown).not.toContain(gone)
+  for (const gone of ['old news', 'another project', 'bad severity', 'prototype severity', 'lookalike project']) expect(shown).not.toContain(gone)
   // A forged kind draws the plain dot, never something off Object's prototype.
   expect(shown.filter((t) => t.includes('object'))).toEqual([])
 
   // The tool reports them too.
   expect(await findings($)).toContain('Another session on this project (peer1234')
+})
+
+test('past ten other sessions, the oldest shares are deleted, so the store never fills up', async ($, on) => {
+  const seed: Record<string, unknown> = {}
+  for (let i = 0; i < 15; i++) seed[`session:%2Fdemo|s${i}`] = { at: Date.now() - i * 60000, lines: [{ kind: 'todo', severity: 'info', text: `n${i}` }] }
+  const kept = memStore(on, seed)
+  await edited($, on, {}, false)
+  const peers = [...kept.keys()].filter((k) => k.startsWith('session:%2Fdemo|') && k !== 'session:%2Fdemo|me')
+  expect(peers.length).toBe(10)
+  // The newest stay.
+  expect(peers).toContain('session:%2Fdemo|s0')
+  expect(peers).not.toContain('session:%2Fdemo|s14')
 })
